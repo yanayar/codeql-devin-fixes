@@ -16,6 +16,7 @@ from typing import List, Dict, Any
 from config import Config
 from github_client import GitHubClient
 from devin_client import DevinClient
+from batch_strategy import create_batches
 from models.alert import CodeQLAlert
 
 
@@ -160,12 +161,25 @@ def batch_alerts(alerts: List[CodeQLAlert], config: Config) -> List[List[CodeQLA
         List of batches (each batch is a list of alerts)
 
     Note:
-        This should:
-        1. Get batch strategy using get_batch_strategy()
-        2. Call strategy.batch(alerts)
-        3. Log batch information (size of each batch, etc.)
+        This calls create_batches() with the configured strategy and logs
+        batch information for traceability.
     """
-    raise NotImplementedError("Alert batching pending")
+    batches = create_batches(
+        alerts,
+        strategy=config.batch_strategy,
+        max_per_batch=config.batch_size
+    )
+
+    for i, batch in enumerate(batches, 1):
+        logger.info(f"Batch {i}: {len(batch)} alerts")
+        if batch:
+            severities = {}
+            for alert in batch:
+                sev = alert.severity.lower()
+                severities[sev] = severities.get(sev, 0) + 1
+            logger.info(f"  Severity breakdown: {severities}")
+
+    return batches
 
 
 def process_batches(

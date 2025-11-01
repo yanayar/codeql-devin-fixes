@@ -18,7 +18,7 @@ class Config:
         devin_api_key: Devin API authentication key
         devin_api_url: Devin API base URL
         batch_size: Maximum number of alerts per batch
-        batch_strategy: Strategy for batching alerts (file, severity, rule, count)
+        batch_strategy: Strategy for batching alerts (file or severity)
         base_branch: Branch to create PRs against
         dry_run: If True, don't create actual PRs (testing mode)
     """
@@ -94,7 +94,7 @@ class Config:
         if self.batch_size < 1:
             raise ValueError("batch_size must be at least 1")
 
-        valid_strategies = ['file', 'severity', 'rule', 'count']
+        valid_strategies = ['file', 'severity']
         if self.batch_strategy not in valid_strategies:
             raise ValueError(
                 f"batch_strategy must be one of {valid_strategies}, "

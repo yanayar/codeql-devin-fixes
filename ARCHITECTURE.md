@@ -83,14 +83,19 @@ Pull Requests (with fixes)
 
 **Responsibility**: Group alerts into logical batches for processing
 
-**Key Methods**:
-- `batch_by_file(alerts, max_per_batch)`: Group alerts by file
-- `batch_by_severity(alerts, max_per_batch)`: Group by severity level
-- `batch_by_rule(alerts, max_per_batch)`: Group by rule type
-- `batch_by_count(alerts, max_per_batch)`: Simple count-based batching
+**Key Functions**:
+- `batch_by_file(alerts, max_per_batch)`: Group alerts by file path, reducing context switching
+- `batch_by_severity(alerts, max_per_batch)`: Group by severity level, prioritizing critical issues
+- `create_batches(alerts, strategy, max_per_batch)`: Main entry point that dispatches to the appropriate strategy
+
+**Batching Strategies**:
+
+1. **File-Based (`file`)**: Groups alerts by file to minimize context switching for Devin. When fixing multiple issues in the same file, Devin can load the file context once, understand the code structure better, and make related fixes together. This reduces merge conflicts but may delay high-severity issues in files with many low-severity alerts.
+
+2. **Severity-Based (`severity`)**: Prioritizes critical security issues first by sorting alerts from critical to low severity. This ensures the most important vulnerabilities are addressed immediately, improving security posture incrementally. However, it may cause more context switching between files and potential merge conflicts.
 
 **Data Flow**:
-- Reads: List of Alert objects
+- Reads: List of Alert objects, strategy name, max batch size
 - Returns: List of batches (each batch is a list of alerts)
 
 ### 5. Devin Client (`src/devin_client.py`)
@@ -133,7 +138,7 @@ Pull Requests (with fixes)
 - `DEVIN_API_KEY`: Devin API authentication
 - `DEVIN_API_URL`: Devin API endpoint
 - `BATCH_SIZE`: Maximum alerts per batch
-- `BATCH_STRATEGY`: Strategy to use (file, severity, rule, count)
+- `BATCH_STRATEGY`: Strategy to use (file or severity)
 - `BASE_BRANCH`: Branch to create PRs against (default: main)
 
 ## GitHub Action YAML Structure

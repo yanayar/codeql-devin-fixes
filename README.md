@@ -125,10 +125,72 @@ The action runs automatically based on the configured schedule. You can also tri
 
 ### Batch Strategies
 
-- **file**: Group alerts by file path (recommended for related fixes)
-- **severity**: Group by severity level (prioritizes critical issues)
-- **rule**: Group by CodeQL rule type (similar vulnerabilities together)
-- **count**: Simple count-based batching (no special grouping)
+The system supports two batching strategies, each optimized for different scenarios:
+
+#### File-Based Strategy (`file`)
+
+Groups alerts that affect the same file together, reducing context switching for Devin.
+
+**How it works:**
+- Groups all alerts by file path
+- Sorts alerts within each file by line number
+- Splits files with >max_per_batch alerts into multiple batches
+- Processes files in alphabetical order
+
+**Benefits:**
+- **Reduced Context Switching**: Devin loads each file's context once and fixes multiple issues together
+- **Better Code Understanding**: Working on one file at a time allows deeper comprehension of the code structure
+- **Related Fixes**: Issues in the same file are often related and can be fixed together more efficiently
+- **Fewer Merge Conflicts**: Changes are localized to specific files, reducing the risk of conflicts
+
+**Tradeoffs:**
+- May delay high-severity issues if they're in files with many low-severity alerts
+- Less optimal if critical vulnerabilities are spread across many files
+
+**Best for:**
+- Repositories with concentrated issues in specific files
+- When code context and understanding are priorities
+- Teams that prefer localized, focused changes
+
+#### Severity-Based Strategy (`severity`)
+
+Prioritizes fixing the most critical security issues first, regardless of file location.
+
+**How it works:**
+- Sorts all alerts by severity: critical → high → medium → low → warning → note
+- Breaks ties by file path and line number for deterministic ordering
+- Splits into batches of max_per_batch size
+- Processes highest severity alerts first
+
+**Benefits:**
+- **Risk Prioritization**: Critical vulnerabilities are addressed immediately
+- **Clear Impact**: Security posture improves incrementally with each batch
+- **Compliance**: Helps meet security requirements by fixing high-severity issues first
+- **Measurable Progress**: Easy to track risk reduction over time
+
+**Tradeoffs:**
+- More context switching between files as Devin jumps between different locations
+- Potential for more merge conflicts if multiple batches touch the same files
+- May be less efficient if many critical issues are in the same file
+
+**Best for:**
+- Security-critical applications where risk reduction is paramount
+- Compliance-driven workflows that require addressing high-severity issues first
+- Repositories with well-distributed issues across many files
+
+#### Choosing a Strategy
+
+**Use `file` strategy when:**
+- You have many alerts concentrated in specific files
+- Code context and understanding are important
+- You want to minimize merge conflicts
+- Development efficiency is a priority
+
+**Use `severity` strategy when:**
+- Security risk reduction is the top priority
+- You need to demonstrate compliance with security standards
+- Critical issues are spread across many files
+- You want clear, measurable security improvements
 
 ## Development
 
@@ -174,10 +236,9 @@ This project currently contains stub implementations with comprehensive docstrin
 - [ ] `cancel_session()` - Cancel running session
 
 #### Batch Strategy (`src/batch_strategy.py`)
-- [ ] `FileBasedBatchStrategy.batch()` - Group by file
-- [ ] `SeverityBasedBatchStrategy.batch()` - Group by severity
-- [ ] `RuleBasedBatchStrategy.batch()` - Group by rule
-- [ ] `CountBasedBatchStrategy.batch()` - Simple count-based
+- [x] `batch_by_file()` - Group by file (implemented)
+- [x] `batch_by_severity()` - Group by severity (implemented)
+- [x] `create_batches()` - Main batching function (implemented)
 
 #### Main Orchestrator (`src/main.py`)
 - [ ] `load_config()` - Load and validate configuration
