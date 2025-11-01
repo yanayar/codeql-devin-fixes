@@ -1,0 +1,3 @@
+Fixing Security Issues: GitHub action for CodeQL Fixes
+	•	Write a GitHub action that identifies and fixes CodeQL issues using Devin for a given repository.
+	•	Ideally, should resolve the CodeQL issues in batches and create a PR for each batch
