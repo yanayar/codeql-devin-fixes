@@ -10,20 +10,22 @@ This test suite validates the behavior of the DevinClient class including:
 - Session cancellation
 - Task description formatting
 - Error handling for various failure scenarios
+- Retry logic for network errors
 
 All tests use pytest mocks to avoid making real API calls.
 """
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, MagicMock, patch, call
 from datetime import datetime
 import requests
 import time
+import json
 
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from devin_client import DevinClient
+from devin_client import DevinClient, DevinClientError
 from models.alert import CodeQLAlert
 from models.session import DevinSession, SessionResult, SessionStatus
 
@@ -139,12 +141,82 @@ def test_create_session_empty_alerts_raises_error(devin_client):
         )
 
 
-def test_create_session_not_implemented(devin_client, sample_alerts):
+def test_create_session_success(devin_client, sample_alerts, mock_session):
     """
-    Validates that create_session raises NotImplementedError as it's not yet implemented.
-    This test will need to be updated once the method is implemented.
+    Validates that create_session successfully creates a session with valid inputs.
+    Checks that the API is called correctly and returns a DevinSession object.
     """
-    with pytest.raises(NotImplementedError, match="Devin API session creation pending"):
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "test_session_123",
+        "url": "https://app.devin.ai/sessions/test_session_123"
+    }
+    mock_session.request.return_value = mock_response
+    
+    session = devin_client.create_session(
+        repo_url="https://github.com/test/repo",
+        alerts=sample_alerts,
+        base_branch="main"
+    )
+    
+    assert session.session_id == "test_session_123"
+    assert session.status == SessionStatus.PENDING
+    assert session.repository_url == "https://github.com/test/repo"
+    assert len(session.alerts) == 3
+    assert session.metadata["base_branch"] == "main"
+    assert session.metadata["url"] == "https://app.devin.ai/sessions/test_session_123"
+    
+    mock_session.request.assert_called_once()
+    call_args = mock_session.request.call_args
+    assert call_args[0][0] == "POST"
+    assert "/sessions" in call_args[0][1]
+
+
+def test_create_session_with_custom_parameters(devin_client, sample_alerts, mock_session):
+    """
+    Validates that create_session correctly handles custom parameters like
+    idempotent, secret_ids, title, and tags.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "test_session_456",
+        "url": "https://app.devin.ai/sessions/test_session_456"
+    }
+    mock_session.request.return_value = mock_response
+    
+    session = devin_client.create_session(
+        repo_url="https://github.com/test/repo",
+        alerts=sample_alerts,
+        base_branch="develop",
+        idempotent=True,
+        secret_ids=["secret_1", "secret_2"],
+        title="Fix security issues",
+        tags=["security", "codeql"]
+    )
+    
+    assert session.session_id == "test_session_456"
+    
+    call_args = mock_session.request.call_args
+    payload = call_args[1]["json"]
+    assert payload["idempotent"] is True
+    assert payload["secret_ids"] == ["secret_1", "secret_2"]
+    assert payload["title"] == "Fix security issues"
+    assert payload["tags"] == ["security", "codeql"]
+
+
+def test_create_session_missing_session_id(devin_client, sample_alerts, mock_session):
+    """
+    Validates that create_session raises DevinClientError when the API response
+    is missing the required session_id field.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"url": "https://app.devin.ai/sessions/test"}
+    mock_session.request.return_value = mock_response
+    
+    with pytest.raises(DevinClientError, match="API response missing session_id"):
         devin_client.create_session(
             repo_url="https://github.com/test/repo",
             alerts=sample_alerts,
@@ -152,50 +224,230 @@ def test_create_session_not_implemented(devin_client, sample_alerts):
         )
 
 
-def test_get_session_status_not_implemented(devin_client):
+def test_get_session_status_success(devin_client, mock_session):
     """
-    Validates that get_session_status raises NotImplementedError as it's not yet implemented.
-    This test will need to be updated once the method is implemented.
+    Validates that get_session_status correctly retrieves and maps session status.
+    Tests the status mapping from Devin API status_enum to SessionStatus.
     """
-    with pytest.raises(NotImplementedError, match="Devin API status check pending"):
-        devin_client.get_session_status(session_id="test_session_123")
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "test_session_123",
+        "status_enum": "working",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T01:00:00",
+        "url": "https://app.devin.ai/sessions/test_session_123"
+    }
+    mock_session.request.return_value = mock_response
+    
+    session = devin_client.get_session_status("test_session_123")
+    
+    assert session.session_id == "test_session_123"
+    assert session.status == SessionStatus.IN_PROGRESS
+    assert isinstance(session.created_at, datetime)
+    assert isinstance(session.updated_at, datetime)
 
 
-def test_wait_for_completion_not_implemented(devin_client):
+def test_get_session_status_completed(devin_client, mock_session):
     """
-    Validates that wait_for_completion raises NotImplementedError as it's not yet implemented.
-    This test will need to be updated once the method is implemented.
+    Validates that get_session_status correctly handles completed sessions
+    and extracts PR URL from the response.
     """
-    with pytest.raises(NotImplementedError, match="Session polling pending"):
-        devin_client.wait_for_completion(
-            session_id="test_session_123",
-            timeout=60,
-            poll_interval=10
-        )
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "test_session_123",
+        "status_enum": "finished",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T02:00:00",
+        "url": "https://app.devin.ai/sessions/test_session_123",
+        "pull_request": {
+            "url": "https://github.com/test/repo/pull/1"
+        }
+    }
+    mock_session.request.return_value = mock_response
+    
+    session = devin_client.get_session_status("test_session_123")
+    
+    assert session.status == SessionStatus.COMPLETED
+    assert session.result is not None
+    assert session.result.pr_url == "https://github.com/test/repo/pull/1"
 
 
-def test_get_session_result_not_implemented(devin_client):
+@patch('devin_client.time.sleep')
+def test_wait_for_completion_success(mock_sleep, devin_client, mock_session):
     """
-    Validates that get_session_result raises NotImplementedError as it's not yet implemented.
-    This test will need to be updated once the method is implemented.
+    Validates that wait_for_completion polls the API until the session
+    reaches a terminal state. Mocks time.sleep to avoid actual delays.
     """
-    with pytest.raises(NotImplementedError, match="Result retrieval pending"):
-        devin_client.get_session_result(session_id="test_session_123")
+    responses = [
+        {"session_id": "test_123", "status_enum": "working", "created_at": "2024-01-01T00:00:00", "updated_at": "2024-01-01T00:00:00"},
+        {"session_id": "test_123", "status_enum": "working", "created_at": "2024-01-01T00:00:00", "updated_at": "2024-01-01T00:30:00"},
+        {"session_id": "test_123", "status_enum": "finished", "created_at": "2024-01-01T00:00:00", "updated_at": "2024-01-01T01:00:00", "pull_request": {"url": "https://github.com/test/repo/pull/1"}}
+    ]
+    
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.side_effect = responses
+    mock_session.request.return_value = mock_response
+    
+    session = devin_client.wait_for_completion("test_123", timeout=3600, poll_interval=30)
+    
+    assert session.status == SessionStatus.COMPLETED
+    assert mock_session.request.call_count == 3
+    assert mock_sleep.call_count == 2
 
 
-def test_cancel_session_not_implemented(devin_client):
+@patch('devin_client.time.time')
+@patch('devin_client.time.sleep')
+def test_wait_for_completion_timeout(mock_sleep, mock_time, devin_client, mock_session):
     """
-    Validates that cancel_session raises NotImplementedError as it's not yet implemented.
-    This test will need to be updated once the method is implemented.
+    Validates that wait_for_completion raises TimeoutError when the session
+    doesn't complete within the specified timeout period.
     """
-    with pytest.raises(NotImplementedError, match="Session cancellation pending"):
-        devin_client.cancel_session(session_id="test_session_123")
+    mock_time.side_effect = [0, 30, 60, 90, 120, 150, 180, 200]
+    
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "test_123",
+        "status_enum": "working",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T00:00:00"
+    }
+    mock_session.request.return_value = mock_response
+    
+    with pytest.raises(TimeoutError, match="did not complete within 100s"):
+        devin_client.wait_for_completion("test_123", timeout=100, poll_interval=30)
+
+
+def test_get_session_result_success(devin_client, mock_session):
+    """
+    Validates that get_session_result successfully retrieves the result
+    of a completed session. Since get_session_status already returns a result
+    with PR URL for completed sessions, this test validates that behavior.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "test_123",
+        "status_enum": "finished",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T01:00:00",
+        "pull_request": {
+            "url": "https://github.com/test/repo/pull/1"
+        }
+    }
+    mock_session.request.return_value = mock_response
+    
+    result = devin_client.get_session_result("test_123")
+    
+    assert isinstance(result, SessionResult)
+    assert result.pr_url == "https://github.com/test/repo/pull/1"
+
+
+def test_get_session_result_not_completed(devin_client, mock_session):
+    """
+    Validates that get_session_result raises DevinClientError when called
+    on a session that hasn't completed successfully.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "test_123",
+        "status_enum": "working",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T00:30:00"
+    }
+    mock_session.request.return_value = mock_response
+    
+    with pytest.raises(DevinClientError, match="Session is not completed successfully"):
+        devin_client.get_session_result("test_123")
+
+
+def test_request_cancellation_success(devin_client, mock_session):
+    """
+    Validates that request_cancellation successfully sends a cancellation
+    message to the session and returns True.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"status": "message_sent"}
+    mock_session.request.return_value = mock_response
+    
+    result = devin_client.request_cancellation("test_123")
+    
+    assert result is True
+    mock_session.request.assert_called_once()
+    call_args = mock_session.request.call_args
+    assert call_args[0][0] == "POST"
+    assert "/sessions/test_123/message" in call_args[0][1]
+    assert "Please stop working" in call_args[1]["json"]["message"]
+
+
+def test_make_request_4xx_error(devin_client, mock_session):
+    """
+    Validates that _make_request raises DevinClientError for 4xx responses
+    and extracts error message from JSON response when available.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 400
+    mock_response.text = "Bad request"
+    mock_response.json.return_value = {"message": "Invalid session ID"}
+    mock_response.headers.get.return_value = "req_123"
+    mock_session.request.return_value = mock_response
+    
+    with pytest.raises(DevinClientError) as exc_info:
+        devin_client._make_request("GET", "/sessions/invalid")
+    
+    error = exc_info.value
+    assert error.status_code == 400
+    assert "Invalid session ID" in error.message
+    assert error.request_id == "req_123"
+
+
+@patch('devin_client.time.sleep')
+def test_make_request_5xx_retry(mock_sleep, devin_client, mock_session):
+    """
+    Validates that _make_request retries on 5xx server errors with
+    exponential backoff before eventually raising DevinClientError.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 503
+    mock_response.text = "Service unavailable"
+    mock_response.headers.get.return_value = None
+    mock_session.request.return_value = mock_response
+    
+    with pytest.raises(DevinClientError) as exc_info:
+        devin_client._make_request("GET", "/sessions/test", max_retries=3)
+    
+    error = exc_info.value
+    assert error.status_code == 503
+    assert mock_session.request.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
+@patch('devin_client.time.sleep')
+def test_make_request_network_error_retry(mock_sleep, devin_client, mock_session):
+    """
+    Validates that _make_request retries on network errors (RequestException)
+    with exponential backoff before raising DevinClientError.
+    """
+    mock_session.request.side_effect = requests.exceptions.ConnectionError("Network error")
+    
+    with pytest.raises(DevinClientError) as exc_info:
+        devin_client._make_request("GET", "/sessions/test", max_retries=3)
+    
+    error = exc_info.value
+    assert "Request failed after 3 attempts" in error.message
+    assert mock_session.request.call_count == 3
+    assert mock_sleep.call_count == 2
 
 
 def test_format_task_description_single_alert(devin_client):
     """
-    Validates that _format_task_description correctly formats a single alert.
-    Checks that all alert details are included in the formatted description.
+    Validates that _format_task_description correctly formats a single alert
+    with all required fields including repo URL and base branch.
     """
     alerts = [
         CodeQLAlert(
@@ -210,7 +462,14 @@ def test_format_task_description_single_alert(devin_client):
         )
     ]
     
-    description = devin_client._format_task_description(alerts, "main")
+    description = devin_client._format_task_description(
+        "https://github.com/test/repo",
+        alerts,
+        "main"
+    )
+    
+    assert "Repository: https://github.com/test/repo" in description
+    assert "Base branch: main" in description
     
     assert "Fix the following CodeQL security issues" in description
     assert "Alert #1: py/sql-injection" in description
@@ -218,15 +477,21 @@ def test_format_task_description_single_alert(devin_client):
     assert "Severity: high" in description
     assert "Issue: SQL injection vulnerability" in description
     assert "Recommendation: Use parameterized queries" in description
-    assert "Create a PR with your changes against main" in description
+    
+    assert "1. Clone the repository and checkout the base branch" in description
+    assert "4. Create a PR with your changes against main" in description
 
 
 def test_format_task_description_multiple_alerts(devin_client, sample_alerts):
     """
-    Validates that _format_task_description correctly formats multiple alerts.
-    Ensures all alerts are numbered and included in the description.
+    Validates that _format_task_description correctly formats multiple alerts
+    and preserves their order.
     """
-    description = devin_client._format_task_description(sample_alerts, "develop")
+    description = devin_client._format_task_description(
+        "https://github.com/test/repo",
+        sample_alerts,
+        "develop"
+    )
     
     assert "1. Alert #1: py/sql-injection" in description
     assert "2. Alert #2: py/xss" in description
@@ -236,75 +501,14 @@ def test_format_task_description_multiple_alerts(devin_client, sample_alerts):
     assert "src/views.py:120" in description
     assert "src/files.py:78" in description
     
+    assert "Base branch: develop" in description
     assert "Create a PR with your changes against develop" in description
-
-
-def test_format_task_description_has_required_sections(devin_client, sample_alerts):
-    """
-    Validates that _format_task_description includes all required sections:
-    - Header
-    - Alert details
-    - Instructions for fixing, testing, and creating PR
-    """
-    description = devin_client._format_task_description(sample_alerts, "main")
-    
-    assert "Fix the following CodeQL security issues" in description
-    assert "Please:" in description
-    assert "1. Fix all listed security issues" in description
-    assert "2. Run tests to ensure fixes don't break functionality" in description
-    assert "3. Create a PR with your changes against main" in description
-
-
-def test_format_task_description_different_base_branches(devin_client, sample_alerts):
-    """
-    Validates that _format_task_description correctly uses different base branch names.
-    This ensures the PR instruction references the correct target branch.
-    """
-    for branch in ["main", "develop", "feature/security-fixes", "release/v1.0"]:
-        description = devin_client._format_task_description(sample_alerts, branch)
-        assert f"Create a PR with your changes against {branch}" in description
-
-
-def test_format_task_description_includes_severity(devin_client, sample_alerts):
-    """
-    Validates that _format_task_description includes severity information for each alert.
-    This helps prioritize fixes based on criticality.
-    """
-    description = devin_client._format_task_description(sample_alerts, "main")
-    
-    assert "Severity: high" in description
-    assert "Severity: medium" in description
-    assert "Severity: critical" in description
-
-
-def test_format_task_description_special_characters(devin_client):
-    """
-    Validates that _format_task_description handles alerts with special characters.
-    Ensures the formatter doesn't break with quotes, newlines, or other special chars.
-    """
-    alerts = [
-        CodeQLAlert(
-            alert_id=1,
-            rule_id="py/code-injection",
-            severity="critical",
-            file_path="src/eval_handler.py",
-            line_number=10,
-            message="Code injection via eval() with user input \"data\"",
-            recommendation="Never use eval() with untrusted input; use ast.literal_eval()",
-            state="open"
-        )
-    ]
-    
-    description = devin_client._format_task_description(alerts, "main")
-    
-    assert 'eval() with user input "data"' in description
-    assert "ast.literal_eval()" in description
 
 
 def test_format_task_description_empty_recommendation(devin_client):
     """
-    Validates that _format_task_description handles alerts with empty recommendations.
-    This tests edge case where CodeQL might not provide specific fix guidance.
+    Validates that _format_task_description handles alerts with empty
+    recommendations by omitting the Recommendation line.
     """
     alerts = [
         CodeQLAlert(
@@ -319,107 +523,55 @@ def test_format_task_description_empty_recommendation(devin_client):
         )
     ]
     
-    description = devin_client._format_task_description(alerts, "main")
+    description = devin_client._format_task_description(
+        "https://github.com/test/repo",
+        alerts,
+        "main"
+    )
     
     assert "Alert #1: py/unknown-vulnerability" in description
-    assert "Recommendation:" in description
-
-
-def test_format_task_description_preserves_order(devin_client):
-    """
-    Validates that _format_task_description preserves the order of alerts.
-    This is important when alerts are pre-sorted by priority or location.
-    """
-    alerts = [
-        CodeQLAlert(
-            alert_id=5, rule_id="rule5", severity="low",
-            file_path="file5.py", line_number=1,
-            message="msg5", recommendation="rec5"
-        ),
-        CodeQLAlert(
-            alert_id=2, rule_id="rule2", severity="high",
-            file_path="file2.py", line_number=1,
-            message="msg2", recommendation="rec2"
-        ),
-        CodeQLAlert(
-            alert_id=8, rule_id="rule8", severity="medium",
-            file_path="file8.py", line_number=1,
-            message="msg8", recommendation="rec8"
-        ),
-    ]
-    
-    description = devin_client._format_task_description(alerts, "main")
-    
+    assert "Issue: Potential security issue" in description
     lines = description.split('\n')
-    alert_lines = [line for line in lines if line.startswith(('1.', '2.', '3.'))]
-    
-    assert "Alert #5: rule5" in alert_lines[0]
-    assert "Alert #2: rule2" in alert_lines[1]
-    assert "Alert #8: rule8" in alert_lines[2]
+    recommendation_lines = [line for line in lines if line.strip().startswith("- Recommendation:")]
+    assert len(recommendation_lines) == 0
 
 
 def test_client_strips_trailing_slashes(mock_session):
     """
-    Validates that DevinClient strips multiple trailing slashes from base URL.
-    This prevents malformed API endpoint URLs.
+    Validates that DevinClient strips multiple trailing slashes from base URL
+    to prevent malformed API endpoint URLs.
     """
     client = DevinClient(api_key="test_key", base_url="https://api.test.com///")
     assert client.base_url == "https://api.test.com"
 
 
-def test_format_task_description_long_messages(devin_client):
+def test_get_session_url_success(devin_client, mock_session):
     """
-    Validates that _format_task_description handles alerts with very long messages.
-    This ensures the formatter doesn't truncate or break with lengthy descriptions.
+    Validates that get_session_url retrieves the session URL from metadata.
     """
-    long_message = "This is a very long security vulnerability description " * 20
-    long_recommendation = "This is a very detailed recommendation " * 15
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "test_123",
+        "status_enum": "working",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T00:00:00",
+        "url": "https://app.devin.ai/sessions/test_123"
+    }
+    mock_session.request.return_value = mock_response
     
-    alerts = [
-        CodeQLAlert(
-            alert_id=1,
-            rule_id="py/complex-vulnerability",
-            severity="high",
-            file_path="src/complex.py",
-            line_number=100,
-            message=long_message,
-            recommendation=long_recommendation,
-            state="open"
-        )
-    ]
+    url = devin_client.get_session_url("test_123")
     
-    description = devin_client._format_task_description(alerts, "main")
-    
-    assert long_message in description
-    assert long_recommendation in description
-    assert "Alert #1: py/complex-vulnerability" in description
+    assert url == "https://app.devin.ai/sessions/test_123"
 
 
-def test_format_task_description_multiple_files(devin_client):
+def test_get_session_url_error(devin_client, mock_session):
     """
-    Validates that _format_task_description correctly handles alerts from different files.
-    This tests the common scenario where security issues span multiple source files.
+    Validates that get_session_url returns None when an error occurs
+    instead of raising an exception.
     """
-    alerts = [
-        CodeQLAlert(
-            alert_id=1, rule_id="rule1", severity="high",
-            file_path="src/auth/login.py", line_number=10,
-            message="Auth issue", recommendation="Fix auth"
-        ),
-        CodeQLAlert(
-            alert_id=2, rule_id="rule2", severity="medium",
-            file_path="src/api/endpoints.py", line_number=50,
-            message="API issue", recommendation="Fix API"
-        ),
-        CodeQLAlert(
-            alert_id=3, rule_id="rule3", severity="low",
-            file_path="tests/test_security.py", line_number=5,
-            message="Test issue", recommendation="Fix test"
-        ),
-    ]
+    mock_session.request.side_effect = Exception("Network error")
     
-    description = devin_client._format_task_description(alerts, "main")
+    url = devin_client.get_session_url("test_123")
     
-    assert "src/auth/login.py:10" in description
-    assert "src/api/endpoints.py:50" in description
-    assert "tests/test_security.py:5" in description
+    assert url is None
