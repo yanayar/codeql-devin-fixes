@@ -86,7 +86,9 @@ def load_config() -> Config:
     Note:
         This will call Config.load_from_env() and Config.validate()
     """
-    raise NotImplementedError("Configuration loading pending")
+    config = Config.load_from_env()
+    config.validate()
+    return config
 
 
 def initialize_github_client(config: Config) -> GitHubClient:
@@ -108,7 +110,20 @@ def initialize_github_client(config: Config) -> GitHubClient:
         2. Verify permissions (check_permissions())
         3. Log repository information
     """
-    raise NotImplementedError("GitHub client initialization pending")
+    logger.info(f"Initializing GitHub client for {config.github_repository}")
+    github_client = GitHubClient(
+        token=config.github_token,
+        repo_name=config.github_repository
+    )
+    
+    repo_info = github_client.get_repository_info()
+    logger.info(f"Connected to repository: {repo_info['full_name']}")
+    logger.info(f"Default branch: {repo_info['default_branch']}")
+    
+    permissions = github_client.check_permissions()
+    logger.info(f"Permissions: {permissions}")
+    
+    return github_client
 
 
 def initialize_devin_client(config: Config) -> DevinClient:
@@ -124,7 +139,12 @@ def initialize_devin_client(config: Config) -> DevinClient:
     Note:
         This should create DevinClient with API key and base URL
     """
-    raise NotImplementedError("Devin client initialization pending")
+    logger.info("Initializing Devin client")
+    devin_client = DevinClient(
+        api_key=config.devin_api_key,
+        base_url=config.devin_api_url
+    )
+    return devin_client
 
 
 def fetch_alerts(github_client: GitHubClient) -> List[CodeQLAlert]:
@@ -146,7 +166,17 @@ def fetch_alerts(github_client: GitHubClient) -> List[CodeQLAlert]:
         2. Filter out any alerts that should be skipped
         3. Log alert summary (count by severity, etc.)
     """
-    raise NotImplementedError("Alert fetching pending")
+    logger.info("Fetching open CodeQL alerts")
+    alerts = github_client.fetch_codeql_alerts(state="open")
+    
+    if alerts:
+        severity_counts = {}
+        for alert in alerts:
+            sev = alert.severity.lower()
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        logger.info(f"Alert severity breakdown: {severity_counts}")
+    
+    return alerts
 
 
 def batch_alerts(alerts: List[CodeQLAlert], config: Config) -> List[List[CodeQLAlert]]:
@@ -210,7 +240,38 @@ def process_batches(
 
         If a batch fails, log the error and continue with remaining batches.
     """
-    raise NotImplementedError("Batch processing pending")
+    results = []
+    
+    for i, batch in enumerate(batches, 1):
+        logger.info(f"Processing batch {i}/{len(batches)} with {len(batch)} alerts")
+        
+        try:
+            result = process_single_batch(
+                batch_num=i,
+                alerts=batch,
+                github_client=github_client,
+                devin_client=devin_client,
+                config=config
+            )
+            results.append(result)
+            
+            if result.get('status') == 'success':
+                logger.info(f"Batch {i} completed successfully")
+                if result.get('pr_url'):
+                    logger.info(f"PR created: {result['pr_url']}")
+            else:
+                logger.error(f"Batch {i} failed: {result.get('error', 'Unknown error')}")
+                
+        except Exception as e:
+            logger.error(f"Batch {i} failed with exception: {e}", exc_info=True)
+            results.append({
+                'batch_num': i,
+                'alert_count': len(batch),
+                'status': 'error',
+                'error': str(e)
+            })
+    
+    return results
 
 
 def process_single_batch(
@@ -247,7 +308,65 @@ def process_single_batch(
         4. Get session result
         5. Return structured result
     """
-    raise NotImplementedError("Single batch processing pending")
+    try:
+        repo_info = github_client.get_repository_info()
+        repo_url = repo_info['clone_url']
+        
+        logger.info(f"Creating Devin session for batch {batch_num}")
+        session = devin_client.create_session(
+            repo_url=repo_url,
+            alerts=alerts,
+            base_branch=config.base_branch
+        )
+        
+        logger.info(f"Session created: {session.session_id}")
+        session_url = devin_client.get_session_url(session.session_id)
+        logger.info(f"Session URL: {session_url}")
+        
+        if config.dry_run:
+            logger.info("Dry run mode: skipping wait for completion")
+            return {
+                'batch_num': batch_num,
+                'alert_count': len(alerts),
+                'session_id': session.session_id,
+                'session_url': session_url,
+                'status': 'dry_run',
+                'pr_url': None
+            }
+        
+        logger.info(f"Waiting for session {session.session_id} to complete")
+        completed_session = devin_client.wait_for_completion(session.session_id)
+        
+        if completed_session.is_successful():
+            result = devin_client.get_session_result(session.session_id)
+            return {
+                'batch_num': batch_num,
+                'alert_count': len(alerts),
+                'session_id': session.session_id,
+                'session_url': session_url,
+                'status': 'success',
+                'pr_url': result.pr_url,
+                'summary': result.summary
+            }
+        else:
+            error_msg = completed_session.error_message or f"Session ended with status: {completed_session.status.value}"
+            return {
+                'batch_num': batch_num,
+                'alert_count': len(alerts),
+                'session_id': session.session_id,
+                'session_url': session_url,
+                'status': 'failed',
+                'error': error_msg
+            }
+            
+    except Exception as e:
+        logger.error(f"Error processing batch {batch_num}: {e}", exc_info=True)
+        return {
+            'batch_num': batch_num,
+            'alert_count': len(alerts),
+            'status': 'error',
+            'error': str(e)
+        }
 
 
 def generate_summary(results: List[Dict[str, Any]], config: Config) -> None:
@@ -272,7 +391,62 @@ def generate_summary(results: List[Dict[str, Any]], config: Config) -> None:
         - List of created PRs
         - Execution time
     """
-    raise NotImplementedError("Summary generation pending")
+    import json
+    from datetime import datetime
+    
+    total_alerts = sum(r.get('alert_count', 0) for r in results)
+    total_batches = len(results)
+    successful_batches = sum(1 for r in results if r.get('status') == 'success')
+    failed_batches = sum(1 for r in results if r.get('status') in ['failed', 'error'])
+    dry_run_batches = sum(1 for r in results if r.get('status') == 'dry_run')
+    
+    pr_urls = [r.get('pr_url') for r in results if r.get('pr_url')]
+    session_urls = [r.get('session_url') for r in results if r.get('session_url')]
+    
+    summary = {
+        'timestamp': datetime.utcnow().isoformat(),
+        'repository': config.github_repository,
+        'batch_strategy': config.batch_strategy,
+        'batch_size': config.batch_size,
+        'dry_run': config.dry_run,
+        'statistics': {
+            'total_alerts': total_alerts,
+            'total_batches': total_batches,
+            'successful_batches': successful_batches,
+            'failed_batches': failed_batches,
+            'dry_run_batches': dry_run_batches
+        },
+        'pr_urls': pr_urls,
+        'session_urls': session_urls,
+        'results': results
+    }
+    
+    with open('summary.json', 'w') as f:
+        json.dump(summary, f, indent=2)
+    
+    logger.info("=" * 60)
+    logger.info("WORKFLOW SUMMARY")
+    logger.info("=" * 60)
+    logger.info(f"Repository: {config.github_repository}")
+    logger.info(f"Total alerts processed: {total_alerts}")
+    logger.info(f"Total batches: {total_batches}")
+    logger.info(f"Successful batches: {successful_batches}")
+    logger.info(f"Failed batches: {failed_batches}")
+    if dry_run_batches > 0:
+        logger.info(f"Dry run batches: {dry_run_batches}")
+    
+    if pr_urls:
+        logger.info(f"PRs created: {len(pr_urls)}")
+        for pr_url in pr_urls:
+            logger.info(f"  - {pr_url}")
+    
+    if session_urls:
+        logger.info(f"Devin sessions: {len(session_urls)}")
+        for session_url in session_urls:
+            logger.info(f"  - {session_url}")
+    
+    logger.info("=" * 60)
+    logger.info(f"Summary saved to summary.json")
 
 
 if __name__ == "__main__":
