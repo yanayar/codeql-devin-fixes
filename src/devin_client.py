@@ -615,8 +615,19 @@ class DevinClient:
         lines.append("3. Run tests to ensure fixes don't break functionality")
         
         if branch_name:
-            lines.append(f"4. Commit all changes to branch {branch_name}")
-            lines.append("5. Output a unified diff and JSON summary with: branch_name, files_modified, commit_messages")
+            lines.append("4. Commit all changes locally (do NOT push)")
+            lines.append("")
+            lines.append("IMPORTANT CONSTRAINTS:")
+            lines.append("- Do NOT create or open a pull request")
+            lines.append("- Do NOT push any branches or tags to the remote repository")
+            lines.append("- The GitHub Client will handle branch creation and PR creation")
+            lines.append("")
+            lines.append("OUTPUT REQUIREMENTS:")
+            lines.append("Output exactly two blocks in this order:")
+            lines.append("1. JSON summary with keys: branch_name, files_modified, commit_messages")
+            lines.append("2. Unified diff for all changes (git diff format)")
+            lines.append("")
+            lines.append("STOP after outputting the JSON summary and unified diff. Do not perform any other actions.")
         else:
             lines.append(f"4. Create a PR with your changes against {base_branch}")
 

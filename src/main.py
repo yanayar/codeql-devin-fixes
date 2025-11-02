@@ -322,12 +322,15 @@ def process_single_batch(
         repo_info = github_client.get_repository_info()
         repo_url = repo_info['clone_url']
         
+        branch_name = f"codeql-fix/batch-{batch_num}"
+        
         logger.info(f"Creating Devin session for batch {batch_num}")
         session = devin_client.create_session(
             repo_url=repo_url,
             alerts=alerts,
             base_branch=config.base_branch,
-            branch_name=f"codeql-fix/batch-{batch_num}-{{session_id}}",
+            branch_name=branch_name,
+            secret_ids=[],
             title=f"Fix CodeQL alerts (batch {batch_num})"
         )
         
