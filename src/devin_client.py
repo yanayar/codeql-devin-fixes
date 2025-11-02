@@ -6,9 +6,14 @@ monitor progress, and retrieve results.
 """
 from typing import List, Optional
 import requests
+import time
+import logging
+from datetime import datetime
 
 from models.alert import CodeQLAlert
-from models.session import DevinSession, SessionResult
+from models.session import DevinSession, SessionResult, SessionStatus
+
+logger = logging.getLogger(__name__)
 
 
 class DevinClient:
@@ -37,6 +42,66 @@ class DevinClient:
             'Content-Type': 'application/json',
         })
 
+    def _make_request(
+        self,
+        method: str,
+        endpoint: str,
+        max_retries: int = 3,
+        **kwargs
+    ) -> requests.Response:
+        """
+        Make an API request with retry logic for network errors.
+
+        Args:
+            method: HTTP method (GET, POST, etc.)
+            endpoint: API endpoint path
+            max_retries: Maximum number of retry attempts (default: 3)
+            **kwargs: Additional arguments to pass to requests
+
+        Returns:
+            Response object
+
+        Raises:
+            requests.HTTPError: If request fails after retries
+            requests.RequestException: If network error persists after retries
+        """
+        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                logger.debug(f"Making {method} request to {url} (attempt {attempt + 1}/{max_retries})")
+                response = self.session.request(method, url, **kwargs)
+                response.raise_for_status()
+                return response
+
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code
+                logger.warning(f"HTTP error {status_code} on attempt {attempt + 1}/{max_retries}: {e}")
+
+                if status_code >= 500:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        logger.info(f"Retrying after {wait_time}s due to server error...")
+                        time.sleep(wait_time)
+                        continue
+                raise
+
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Network error on attempt {attempt + 1}/{max_retries}: {e}")
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.info(f"Retrying after {wait_time}s due to network error...")
+                    time.sleep(wait_time)
+                    continue
+                raise
+
+        if last_error:
+            raise last_error
+        raise requests.RequestException("Request failed after all retries")
+
     def create_session(
         self,
         repo_url: str,
@@ -59,27 +124,55 @@ class DevinClient:
         Raises:
             requests.HTTPError: If API request fails
             ValueError: If alerts list is empty
-
-        Note:
-            This will call the Devin API endpoint:
-            POST /sessions
-
-            Request body should include:
-            - repository_url: URL of the repo
-            - task_description: Formatted instructions with alert details
-            - alerts: Serialized alert information
-            - metadata: Additional context (base_branch, etc.)
-
-            The task_description should be formatted to clearly explain:
-            1. The security issues that need fixing
-            2. File locations and line numbers
-            3. Recommended fixes from CodeQL
-            4. Request to create a PR with the fixes
         """
         if not alerts:
             raise ValueError("Cannot create session with empty alerts list")
 
-        raise NotImplementedError("Devin API session creation pending")
+        logger.info(f"Creating Devin session for {len(alerts)} alerts in {repo_url}")
+
+        task_description = instructions or self._format_task_description(alerts, base_branch)
+
+        payload = {
+            "prompt": task_description,
+            "idempotent": False
+        }
+
+        try:
+            response = self._make_request("POST", "/sessions", json=payload)
+            data = response.json()
+
+            session_id = data.get("session_id")
+            if not session_id:
+                raise ValueError("API response missing session_id")
+
+            logger.info(f"Created Devin session: {session_id}")
+
+            session = DevinSession(
+                session_id=session_id,
+                status=SessionStatus.PENDING,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+                alerts=alerts,
+                repository_url=repo_url,
+                instructions=task_description,
+                metadata={"base_branch": base_branch}
+            )
+
+            return session
+
+        except requests.HTTPError as e:
+            error_msg = f"Failed to create Devin session: HTTP {e.response.status_code}"
+            try:
+                error_detail = e.response.json()
+                error_msg += f" - {error_detail}"
+            except Exception:
+                error_msg += f" - {e.response.text}"
+            logger.error(error_msg)
+            raise requests.HTTPError(error_msg, response=e.response)
+
+        except Exception as e:
+            logger.error(f"Unexpected error creating Devin session: {e}")
+            raise
 
     def get_session_status(self, session_id: str) -> DevinSession:
         """
@@ -93,18 +186,61 @@ class DevinClient:
 
         Raises:
             requests.HTTPError: If API request fails
-
-        Note:
-            This will call the Devin API endpoint:
-            GET /sessions/{session_id}
-
-            Response should include:
-            - session_id
-            - status (pending, in_progress, completed, failed)
-            - progress information
-            - result (if completed)
         """
-        raise NotImplementedError("Devin API status check pending")
+        logger.debug(f"Fetching status for session {session_id}")
+
+        try:
+            response = self._make_request("GET", f"/sessions/{session_id}")
+            data = response.json()
+
+            status_enum = data.get("status_enum", "working")
+            status_map = {
+                "working": SessionStatus.IN_PROGRESS,
+                "blocked": SessionStatus.IN_PROGRESS,
+                "finished": SessionStatus.COMPLETED,
+                "expired": SessionStatus.TIMEOUT,
+                "suspend_requested": SessionStatus.IN_PROGRESS,
+                "suspend_requested_frontend": SessionStatus.IN_PROGRESS,
+                "resume_requested": SessionStatus.IN_PROGRESS,
+                "resume_requested_frontend": SessionStatus.IN_PROGRESS,
+                "resumed": SessionStatus.IN_PROGRESS,
+            }
+            status = status_map.get(status_enum, SessionStatus.IN_PROGRESS)
+
+            created_at = datetime.fromisoformat(data.get("created_at", datetime.utcnow().isoformat()).replace("+00:00", ""))
+            updated_at = datetime.fromisoformat(data.get("updated_at", datetime.utcnow().isoformat()).replace("+00:00", ""))
+
+            result = None
+            if status == SessionStatus.COMPLETED:
+                pr_data = data.get("pull_request")
+                pr_url = pr_data.get("url") if pr_data else None
+                result = SessionResult(pr_url=pr_url)
+
+            session = DevinSession(
+                session_id=session_id,
+                status=status,
+                created_at=created_at,
+                updated_at=updated_at,
+                result=result,
+                metadata={"raw_status": status_enum}
+            )
+
+            logger.debug(f"Session {session_id} status: {status.value}")
+            return session
+
+        except requests.HTTPError as e:
+            error_msg = f"Failed to get session status: HTTP {e.response.status_code}"
+            try:
+                error_detail = e.response.json()
+                error_msg += f" - {error_detail}"
+            except Exception:
+                error_msg += f" - {e.response.text}"
+            logger.error(error_msg)
+            raise requests.HTTPError(error_msg, response=e.response)
+
+        except Exception as e:
+            logger.error(f"Unexpected error getting session status: {e}")
+            raise
 
     def wait_for_completion(
         self,
@@ -126,17 +262,37 @@ class DevinClient:
         Raises:
             TimeoutError: If session doesn't complete within timeout
             requests.HTTPError: If API request fails
-
-        Note:
-            This method polls the session status at regular intervals until
-            the session reaches a terminal state (completed, failed, or timeout).
-
-            Implementation should:
-            1. Poll get_session_status() at poll_interval
-            2. Check if session is in terminal state
-            3. Return when complete or raise TimeoutError
         """
-        raise NotImplementedError("Session polling pending")
+        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s)")
+        start_time = time.time()
+
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed >= timeout:
+                error_msg = f"Session {session_id} did not complete within {timeout}s"
+                logger.error(error_msg)
+                raise TimeoutError(error_msg)
+
+            try:
+                session = self.get_session_status(session_id)
+
+                if session.is_terminal():
+                    logger.info(f"Session {session_id} reached terminal state: {session.status.value}")
+                    return session
+
+                logger.debug(f"Session {session_id} still in progress, waiting {poll_interval}s...")
+                time.sleep(poll_interval)
+
+            except requests.HTTPError as e:
+                if e.response.status_code == 404:
+                    error_msg = f"Session {session_id} not found"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                raise
+
+            except Exception as e:
+                logger.error(f"Error while waiting for session completion: {e}")
+                raise
 
     def get_session_result(self, session_id: str) -> SessionResult:
         """
@@ -151,16 +307,54 @@ class DevinClient:
         Raises:
             requests.HTTPError: If API request fails
             ValueError: If session is not completed
-
-        Note:
-            This should extract from the session:
-            - PR URL created by Devin
-            - Branch name with fixes
-            - List of commits made
-            - Files that were modified
-            - Summary of changes
         """
-        raise NotImplementedError("Result retrieval pending")
+        logger.info(f"Retrieving result for session {session_id}")
+
+        try:
+            session = self.get_session_status(session_id)
+
+            if not session.is_successful():
+                error_msg = f"Session {session_id} is not completed successfully (status: {session.status.value})"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
+            if session.result:
+                logger.info(f"Retrieved result for session {session_id}")
+                return session.result
+
+            response = self._make_request("GET", f"/sessions/{session_id}")
+            data = response.json()
+
+            pr_data = data.get("pull_request")
+            pr_url = pr_data.get("url") if pr_data else None
+
+            structured_output = data.get("structured_output", {})
+
+            result = SessionResult(
+                pr_url=pr_url,
+                branch_name=None,
+                commits=[],
+                files_modified=[],
+                alerts_fixed=0,
+                summary=structured_output.get("result") if structured_output else None
+            )
+
+            logger.info(f"Retrieved result for session {session_id}: PR={pr_url}")
+            return result
+
+        except requests.HTTPError as e:
+            error_msg = f"Failed to get session result: HTTP {e.response.status_code}"
+            try:
+                error_detail = e.response.json()
+                error_msg += f" - {error_detail}"
+            except Exception:
+                error_msg += f" - {e.response.text}"
+            logger.error(error_msg)
+            raise requests.HTTPError(error_msg, response=e.response)
+
+        except Exception as e:
+            logger.error(f"Unexpected error getting session result: {e}")
+            raise
 
     def cancel_session(self, session_id: str) -> None:
         """
@@ -173,10 +367,31 @@ class DevinClient:
             requests.HTTPError: If API request fails
 
         Note:
-            This will call the Devin API endpoint:
-            POST /sessions/{session_id}/cancel
+            The Devin API doesn't have a direct cancel endpoint.
+            This method sends a message to the session requesting cancellation.
         """
-        raise NotImplementedError("Session cancellation pending")
+        logger.info(f"Requesting cancellation for session {session_id}")
+
+        try:
+            payload = {
+                "message": "Please stop working and cancel this session."
+            }
+            self._make_request("POST", f"/sessions/{session_id}/messages", json=payload)
+            logger.info(f"Cancellation requested for session {session_id}")
+
+        except requests.HTTPError as e:
+            error_msg = f"Failed to cancel session: HTTP {e.response.status_code}"
+            try:
+                error_detail = e.response.json()
+                error_msg += f" - {error_detail}"
+            except Exception:
+                error_msg += f" - {e.response.text}"
+            logger.error(error_msg)
+            raise requests.HTTPError(error_msg, response=e.response)
+
+        except Exception as e:
+            logger.error(f"Unexpected error cancelling session: {e}")
+            raise
 
     def _format_task_description(
         self,
