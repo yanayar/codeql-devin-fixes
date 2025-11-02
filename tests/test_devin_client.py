@@ -565,13 +565,35 @@ def test_get_session_url_success(devin_client, mock_session):
     assert url == "https://app.devin.ai/sessions/test_123"
 
 
-def test_get_session_url_error(devin_client, mock_session):
+def test_get_session_url_fallback(devin_client, mock_session):
     """
-    Validates that get_session_url returns None when an error occurs
-    instead of raising an exception.
+    Validates that get_session_url constructs a URL from session_id
+    when the stored URL is not available in metadata. The URL is derived
+    from the client's base_url by replacing 'api.' with 'app.'.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "test_123",
+        "status_enum": "working",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T00:00:00"
+    }
+    mock_session.request.return_value = mock_response
+    
+    url = devin_client.get_session_url("test_123")
+    
+    assert url == "https://app.test.com/sessions/test_123"
+
+
+def test_get_session_url_error_fallback(devin_client, mock_session):
+    """
+    Validates that get_session_url constructs a URL even when
+    get_session_status fails, providing a fallback URL derived from
+    the client's base_url.
     """
     mock_session.request.side_effect = Exception("Network error")
     
     url = devin_client.get_session_url("test_123")
     
-    assert url is None
+    assert url == "https://app.test.com/sessions/test_123"
