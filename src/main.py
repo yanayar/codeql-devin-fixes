@@ -358,6 +358,17 @@ def process_single_batch(
                 'status': 'failed',
                 'error': error_msg
             }
+    
+    except TimeoutError as e:
+        logger.error(f"Batch {batch_num} timed out: {e}")
+        return {
+            'batch_num': batch_num,
+            'alert_count': len(alerts),
+            'session_id': session.session_id if 'session' in locals() else None,
+            'session_url': session_url if 'session_url' in locals() else None,
+            'status': 'timeout',
+            'error': f"Session timed out: {str(e)}"
+        }
             
     except Exception as e:
         logger.error(f"Error processing batch {batch_num}: {e}", exc_info=True)
@@ -398,6 +409,7 @@ def generate_summary(results: List[Dict[str, Any]], config: Config) -> None:
     total_batches = len(results)
     successful_batches = sum(1 for r in results if r.get('status') == 'success')
     failed_batches = sum(1 for r in results if r.get('status') in ['failed', 'error'])
+    timeout_batches = sum(1 for r in results if r.get('status') == 'timeout')
     dry_run_batches = sum(1 for r in results if r.get('status') == 'dry_run')
     
     pr_urls = [r.get('pr_url') for r in results if r.get('pr_url')]
@@ -414,6 +426,7 @@ def generate_summary(results: List[Dict[str, Any]], config: Config) -> None:
             'total_batches': total_batches,
             'successful_batches': successful_batches,
             'failed_batches': failed_batches,
+            'timeout_batches': timeout_batches,
             'dry_run_batches': dry_run_batches
         },
         'pr_urls': pr_urls,
@@ -432,6 +445,8 @@ def generate_summary(results: List[Dict[str, Any]], config: Config) -> None:
     logger.info(f"Total batches: {total_batches}")
     logger.info(f"Successful batches: {successful_batches}")
     logger.info(f"Failed batches: {failed_batches}")
+    if timeout_batches > 0:
+        logger.info(f"Timeout batches: {timeout_batches}")
     if dry_run_batches > 0:
         logger.info(f"Dry run batches: {dry_run_batches}")
     

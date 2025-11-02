@@ -111,6 +111,8 @@ class DevinClient:
         """
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         last_error = None
+        
+        kwargs.setdefault('timeout', 30)
 
         for attempt in range(max_retries):
             try:
@@ -312,6 +314,11 @@ class DevinClient:
                 "blocked": SessionStatus.IN_PROGRESS,
                 "finished": SessionStatus.COMPLETED,
                 "expired": SessionStatus.TIMEOUT,
+                "timeout": SessionStatus.TIMEOUT,
+                "failed": SessionStatus.FAILED,
+                "error": SessionStatus.FAILED,
+                "cancelled": SessionStatus.FAILED,
+                "canceled": SessionStatus.FAILED,
                 "suspend_requested": SessionStatus.IN_PROGRESS,
                 "suspend_requested_frontend": SessionStatus.IN_PROGRESS,
                 "resume_requested": SessionStatus.IN_PROGRESS,
@@ -319,6 +326,9 @@ class DevinClient:
                 "resumed": SessionStatus.IN_PROGRESS,
             }
             status = status_map.get(status_enum, SessionStatus.IN_PROGRESS)
+            
+            if status_enum not in status_map:
+                logger.warning(f"Unknown session status_enum '{status_enum}' for session {session_id}, defaulting to IN_PROGRESS")
 
             created_at = datetime.fromisoformat(data.get("created_at", datetime.utcnow().isoformat()).replace("+00:00", ""))
             updated_at = datetime.fromisoformat(data.get("updated_at", datetime.utcnow().isoformat()).replace("+00:00", ""))
@@ -378,29 +388,46 @@ class DevinClient:
             TimeoutError: If session doesn't complete within timeout
             DevinClientError: If API request fails
         """
-        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s)")
+        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s, poll_interval: {poll_interval}s)")
         start_time = time.time()
+        poll_count = 0
 
         while True:
             elapsed = time.time() - start_time
             if elapsed >= timeout:
-                error_msg = f"Session {session_id} did not complete within {timeout}s"
+                error_msg = f"Session {session_id} did not complete within {timeout}s (after {poll_count} polls)"
                 logger.error(error_msg)
                 raise TimeoutError(error_msg)
 
             try:
+                poll_count += 1
                 session = self.get_session_status(session_id)
+                
+                raw_status = session.metadata.get('raw_status', 'unknown')
+                logger.info(
+                    f"Poll #{poll_count} for session {session_id}: "
+                    f"elapsed={elapsed:.1f}s, "
+                    f"status={session.status.value}, "
+                    f"raw_status={raw_status}"
+                )
 
                 if session.is_terminal():
-                    logger.info(f"Session {session_id} reached terminal state: {session.status.value}")
+                    logger.info(f"Session {session_id} reached terminal state: {session.status.value} (after {poll_count} polls)")
                     return session
 
-                logger.debug(f"Session {session_id} still in progress, waiting {poll_interval}s...")
-                time.sleep(poll_interval)
+                elapsed_after_check = time.time() - start_time
+                if elapsed_after_check >= timeout:
+                    error_msg = f"Session {session_id} did not complete within {timeout}s (after {poll_count} polls)"
+                    logger.error(error_msg)
+                    raise TimeoutError(error_msg)
+                
+                sleep_duration = min(poll_interval, max(0, timeout - elapsed_after_check))
+                logger.info(f"Session {session_id} still in progress, sleeping for {sleep_duration:.1f}s...")
+                time.sleep(sleep_duration)
 
             except DevinClientError as e:
                 if e.status_code == 404:
-                    logger.error(f"Session {session_id} not found")
+                    logger.error(f"Session {session_id} not found (after {poll_count} polls)")
                     raise DevinClientError(
                         operation="wait_for_completion",
                         message=f"Session not found",
@@ -410,7 +437,7 @@ class DevinClient:
                 raise
 
             except Exception as e:
-                logger.error(f"Error while waiting for session completion: {e}")
+                logger.error(f"Error while waiting for session completion (after {poll_count} polls): {e}")
                 raise DevinClientError(
                     operation="wait_for_completion",
                     message=f"Unexpected error: {str(e)}",
