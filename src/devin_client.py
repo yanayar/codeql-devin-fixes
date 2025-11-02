@@ -111,6 +111,8 @@ class DevinClient:
         """
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         last_error = None
+        
+        kwargs.setdefault('timeout', 30)
 
         for attempt in range(max_retries):
             try:
@@ -308,12 +310,18 @@ class DevinClient:
             response = self._make_request("GET", f"/sessions/{session_id}")
             data = response.json()
 
-            status_enum = data.get("status_enum", "working")
+            status_enum = data.get("status_enum") or "working"
             status_map = {
                 "working": SessionStatus.IN_PROGRESS,
                 "blocked": SessionStatus.IN_PROGRESS,
+                "pending": SessionStatus.PENDING,
                 "finished": SessionStatus.COMPLETED,
                 "expired": SessionStatus.TIMEOUT,
+                "timeout": SessionStatus.TIMEOUT,
+                "failed": SessionStatus.FAILED,
+                "error": SessionStatus.FAILED,
+                "cancelled": SessionStatus.FAILED,
+                "canceled": SessionStatus.FAILED,
                 "suspend_requested": SessionStatus.IN_PROGRESS,
                 "suspend_requested_frontend": SessionStatus.IN_PROGRESS,
                 "resume_requested": SessionStatus.IN_PROGRESS,
@@ -321,6 +329,9 @@ class DevinClient:
                 "resumed": SessionStatus.IN_PROGRESS,
             }
             status = status_map.get(status_enum, SessionStatus.IN_PROGRESS)
+            
+            if status_enum not in status_map:
+                logger.warning(f"Unknown session status_enum '{status_enum}' for session {session_id}, defaulting to IN_PROGRESS")
 
             created_at = datetime.fromisoformat(data.get("created_at", datetime.utcnow().isoformat()).replace("+00:00", ""))
             updated_at = datetime.fromisoformat(data.get("updated_at", datetime.utcnow().isoformat()).replace("+00:00", ""))
@@ -363,7 +374,8 @@ class DevinClient:
         self,
         session_id: str,
         timeout: int = 3600,
-        poll_interval: int = 30
+        poll_interval: int = 30,
+        initial_delay: int = 30
     ) -> DevinSession:
         """
         Wait for a Devin session to complete.
@@ -372,6 +384,7 @@ class DevinClient:
             session_id: The session identifier
             timeout: Maximum time to wait in seconds (default: 1 hour)
             poll_interval: Time between status checks in seconds (default: 30s)
+            initial_delay: Seconds to wait before starting polling to allow session initialization (default: 30s)
 
         Returns:
             DevinSession with final status and results
@@ -380,29 +393,52 @@ class DevinClient:
             TimeoutError: If session doesn't complete within timeout
             DevinClientError: If API request fails
         """
-        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s)")
+        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s, poll_interval: {poll_interval}s, initial_delay: {initial_delay}s)")
+        
+        if initial_delay > 0:
+            logger.info(f"Delaying polling start for {initial_delay}s to allow session initialization")
+            time.sleep(initial_delay)
+            logger.info(f"Starting polling after initial delay of {initial_delay}s")
+        
         start_time = time.time()
+        poll_count = 0
 
         while True:
             elapsed = time.time() - start_time
             if elapsed >= timeout:
-                error_msg = f"Session {session_id} did not complete within {timeout}s"
+                error_msg = f"Session {session_id} did not complete within {timeout}s (after {poll_count} polls)"
                 logger.error(error_msg)
                 raise TimeoutError(error_msg)
 
             try:
+                poll_count += 1
                 session = self.get_session_status(session_id)
+                
+                raw_status = session.metadata.get('raw_status', 'unknown')
+                logger.info(
+                    f"Poll #{poll_count} for session {session_id}: "
+                    f"elapsed={elapsed:.1f}s, "
+                    f"status={session.status.value}, "
+                    f"raw_status={raw_status}"
+                )
 
                 if session.is_terminal():
-                    logger.info(f"Session {session_id} reached terminal state: {session.status.value}")
+                    logger.info(f"Session {session_id} reached terminal state: {session.status.value} (after {poll_count} polls)")
                     return session
 
-                logger.debug(f"Session {session_id} still in progress, waiting {poll_interval}s...")
-                time.sleep(poll_interval)
+                elapsed_after_check = time.time() - start_time
+                if elapsed_after_check >= timeout:
+                    error_msg = f"Session {session_id} did not complete within {timeout}s (after {poll_count} polls)"
+                    logger.error(error_msg)
+                    raise TimeoutError(error_msg)
+                
+                sleep_duration = min(poll_interval, max(0, timeout - elapsed_after_check))
+                logger.info(f"Session {session_id} still in progress, sleeping for {sleep_duration:.1f}s...")
+                time.sleep(sleep_duration)
 
             except DevinClientError as e:
                 if e.status_code == 404:
-                    logger.error(f"Session {session_id} not found")
+                    logger.error(f"Session {session_id} not found (after {poll_count} polls)")
                     raise DevinClientError(
                         operation="wait_for_completion",
                         message=f"Session not found",
@@ -412,7 +448,7 @@ class DevinClient:
                 raise
 
             except Exception as e:
-                logger.error(f"Error while waiting for session completion: {e}")
+                logger.error(f"Error while waiting for session completion (after {poll_count} polls): {e}")
                 raise DevinClientError(
                     operation="wait_for_completion",
                     message=f"Unexpected error: {str(e)}",

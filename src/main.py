@@ -9,6 +9,9 @@ This module coordinates the entire workflow:
 5. Wait for fixes and create PRs
 6. Report results
 """
+from dotenv import load_dotenv
+load_dotenv()
+
 import sys
 import logging
 from typing import List, Dict, Any
