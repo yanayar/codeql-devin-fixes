@@ -308,10 +308,11 @@ class DevinClient:
             response = self._make_request("GET", f"/sessions/{session_id}")
             data = response.json()
 
-            status_enum = data.get("status_enum", "working")
+            status_enum = data.get("status_enum") or "working"
             status_map = {
                 "working": SessionStatus.IN_PROGRESS,
                 "blocked": SessionStatus.IN_PROGRESS,
+                "pending": SessionStatus.PENDING,
                 "finished": SessionStatus.COMPLETED,
                 "expired": SessionStatus.TIMEOUT,
                 "timeout": SessionStatus.TIMEOUT,
@@ -371,7 +372,8 @@ class DevinClient:
         self,
         session_id: str,
         timeout: int = 3600,
-        poll_interval: int = 30
+        poll_interval: int = 30,
+        initial_delay: int = 30
     ) -> DevinSession:
         """
         Wait for a Devin session to complete.
@@ -380,6 +382,7 @@ class DevinClient:
             session_id: The session identifier
             timeout: Maximum time to wait in seconds (default: 1 hour)
             poll_interval: Time between status checks in seconds (default: 30s)
+            initial_delay: Seconds to wait before starting polling to allow session initialization (default: 30s)
 
         Returns:
             DevinSession with final status and results
@@ -388,7 +391,13 @@ class DevinClient:
             TimeoutError: If session doesn't complete within timeout
             DevinClientError: If API request fails
         """
-        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s, poll_interval: {poll_interval}s)")
+        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s, poll_interval: {poll_interval}s, initial_delay: {initial_delay}s)")
+        
+        if initial_delay > 0:
+            logger.info(f"Delaying polling start for {initial_delay}s to allow session initialization")
+            time.sleep(initial_delay)
+            logger.info(f"Starting polling after initial delay of {initial_delay}s")
+        
         start_time = time.time()
         poll_count = 0
 
