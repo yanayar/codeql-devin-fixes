@@ -1,5 +1,15 @@
 # Python
 venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Environment variables
+.env
+.envrc
 
 # OS
 .DS_Store

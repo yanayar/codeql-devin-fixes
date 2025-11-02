@@ -8,7 +8,9 @@ from typing import List, Optional
 import requests
 import time
 import logging
+import os
 from datetime import datetime
+from urllib.parse import urlparse
 
 from models.alert import CodeQLAlert
 from models.session import DevinSession, SessionResult, SessionStatus
@@ -567,7 +569,34 @@ class DevinClient:
 
         return "\n".join(lines)
     
-    def get_session_url(self, session_id: str) -> Optional[str]:
+    def _get_app_base_url(self) -> str:
+        """
+        Derive the Devin app base URL from the API base URL.
+        
+        Returns:
+            Base URL for the Devin web app
+            
+        Note:
+            This method attempts to derive the app URL by:
+            1. Using DEVIN_APP_BASE_URL env var if set
+            2. Replacing "api." with "app." in the API base URL
+            3. Falling back to https://app.devin.ai as default
+        """
+        env_app_url = os.environ.get('DEVIN_APP_BASE_URL')
+        if env_app_url:
+            return env_app_url.rstrip('/')
+        
+        try:
+            parsed = urlparse(self.base_url)
+            if 'api.' in parsed.netloc:
+                app_netloc = parsed.netloc.replace('api.', 'app.')
+                return f"{parsed.scheme}://{app_netloc}"
+        except Exception as e:
+            logger.debug(f"Could not derive app URL from base_url: {e}")
+        
+        return "https://app.devin.ai"
+    
+    def get_session_url(self, session_id: str) -> str:
         """
         Get the web URL to view a session in the Devin UI.
 
@@ -575,16 +604,27 @@ class DevinClient:
             session_id: The session identifier
 
         Returns:
-            URL to view the session, or None if not available
+            URL to view the session in the Devin web interface
 
         Note:
-            The URL is captured when the session is created. If you need
-            the URL for an existing session, it should be retrieved from
-            the DevinSession.metadata['url'] field.
+            This method first attempts to retrieve the URL from the session
+            metadata (if it was captured during session creation). If not
+            available, it constructs the URL from the session_id using the
+            pattern: {app_base_url}/sessions/{session_id}
+            
+            The app base URL is derived from the API base URL by replacing
+            "api." with "app.", or can be overridden with the
+            DEVIN_APP_BASE_URL environment variable.
         """
         try:
             session = self.get_session_status(session_id)
-            return session.metadata.get('url')
+            stored_url = session.metadata.get('url')
+            if stored_url:
+                return stored_url
         except Exception as e:
-            logger.warning(f"Could not retrieve session URL for {session_id}: {e}")
-            return None
+            logger.debug(f"Could not retrieve stored URL for session {session_id}: {e}")
+        
+        app_base = self._get_app_base_url()
+        constructed_url = f"{app_base}/sessions/{session_id}"
+        logger.debug(f"Constructed session URL: {constructed_url}")
+        return constructed_url
