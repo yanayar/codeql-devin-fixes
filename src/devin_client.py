@@ -189,6 +189,7 @@ class DevinClient:
         alerts: List[CodeQLAlert],
         instructions: Optional[str] = None,
         base_branch: str = "main",
+        branch_name: Optional[str] = None,
         idempotent: bool = False,
         secret_ids: Optional[List[str]] = None,
         title: Optional[str] = None,
@@ -202,6 +203,7 @@ class DevinClient:
             alerts: List of CodeQL alerts to address
             instructions: Optional custom instructions for Devin
             base_branch: Base branch to work from
+            branch_name: Optional branch name for Devin to commit changes to
             idempotent: Enable idempotent session creation (default: False)
             secret_ids: List of secret IDs to use (None = all secrets, [] = no secrets)
             title: Custom title for the session
@@ -225,7 +227,7 @@ class DevinClient:
         logger.info(f"Creating Devin session for {len(alerts)} alerts in {repo_url}")
 
         task_description = instructions or self._format_task_description(
-            repo_url, alerts, base_branch
+            repo_url, alerts, base_branch, branch_name
         )
 
         payload = {
@@ -456,16 +458,24 @@ class DevinClient:
 
             structured_output = data.get("structured_output", {})
 
+            branch_name = structured_output.get("branch_name") if structured_output else None
+            files_modified = structured_output.get("files_modified", []) if structured_output else []
+            diff = structured_output.get("diff") if structured_output else None
+            commit_messages = structured_output.get("commit_messages", []) if structured_output else []
+            summary = structured_output.get("result") if structured_output else None
+
             result = SessionResult(
                 pr_url=pr_url,
-                branch_name=None,
+                branch_name=branch_name,
                 commits=[],
-                files_modified=[],
-                alerts_fixed=0,
-                summary=structured_output.get("result") if structured_output else None
+                files_modified=files_modified,
+                alerts_fixed=len(files_modified) if files_modified else 0,
+                summary=summary,
+                diff=diff,
+                commit_messages=commit_messages
             )
 
-            logger.info(f"Retrieved result for session {session_id}: PR={pr_url}")
+            logger.info(f"Retrieved result for session {session_id}: branch={branch_name}, files={len(files_modified)}")
             return result
 
         except DevinClientError:
@@ -531,7 +541,8 @@ class DevinClient:
         self,
         repo_url: str,
         alerts: List[CodeQLAlert],
-        base_branch: str
+        base_branch: str,
+        branch_name: Optional[str] = None
     ) -> str:
         """
         Format a task description for Devin from CodeQL alerts.
@@ -540,6 +551,7 @@ class DevinClient:
             repo_url: URL of the repository to fix
             alerts: List of alerts to fix
             base_branch: Base branch to work from
+            branch_name: Optional branch name to commit changes to
 
         Returns:
             Formatted task description string
@@ -565,7 +577,12 @@ class DevinClient:
         lines.append("1. Clone the repository and checkout the base branch")
         lines.append("2. Fix all listed security issues")
         lines.append("3. Run tests to ensure fixes don't break functionality")
-        lines.append(f"4. Create a PR with your changes against {base_branch}")
+        
+        if branch_name:
+            lines.append(f"4. Commit all changes to branch {branch_name}")
+            lines.append("5. Output a unified diff and JSON summary with: branch_name, files_modified, commit_messages")
+        else:
+            lines.append(f"4. Create a PR with your changes against {base_branch}")
 
         return "\n".join(lines)
     
