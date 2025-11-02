@@ -615,16 +615,25 @@ class DevinClient:
             The app base URL is derived from the API base URL by replacing
             "api." with "app.", or can be overridden with the
             DEVIN_APP_BASE_URL environment variable.
+            
+            The method normalizes URLs by removing the 'devin-' prefix from
+            session IDs in the path, as the API sometimes returns session IDs
+            with this prefix but the correct URL format doesn't include it.
         """
         try:
             session = self.get_session_status(session_id)
             stored_url = session.metadata.get('url')
             if stored_url:
-                return stored_url
+                normalized_url = stored_url.replace('/sessions/devin-', '/sessions/')
+                return normalized_url
         except Exception as e:
             logger.debug(f"Could not retrieve stored URL for session {session_id}: {e}")
         
+        normalized_session_id = session_id
+        if session_id.startswith('devin-'):
+            normalized_session_id = session_id[6:]  # Remove 'devin-' prefix
+        
         app_base = self._get_app_base_url()
-        constructed_url = f"{app_base}/sessions/{session_id}"
+        constructed_url = f"{app_base}/sessions/{normalized_session_id}"
         logger.debug(f"Constructed session URL: {constructed_url}")
         return constructed_url

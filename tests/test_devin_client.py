@@ -597,3 +597,66 @@ def test_get_session_url_error_fallback(devin_client, mock_session):
     url = devin_client.get_session_url("test_123")
     
     assert url == "https://app.test.com/sessions/test_123"
+
+
+def test_get_session_url_strips_devin_prefix_from_stored_url(devin_client, mock_session):
+    """
+    Validates that get_session_url normalizes stored URLs by removing
+    the 'devin-' prefix from the session path. The API sometimes returns
+    URLs with format /sessions/devin-<id> but the correct format is
+    /sessions/<id>.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "devin-12345",
+        "status_enum": "working",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T00:00:00",
+        "url": "https://app.devin.ai/sessions/devin-12345"
+    }
+    mock_session.request.return_value = mock_response
+    
+    url = devin_client.get_session_url("devin-12345")
+    
+    assert url == "https://app.devin.ai/sessions/12345"
+
+
+def test_get_session_url_strips_devin_prefix_from_constructed_url(devin_client, mock_session):
+    """
+    Validates that get_session_url normalizes constructed URLs by removing
+    the 'devin-' prefix from the session_id when constructing the fallback URL.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "devin-12345",
+        "status_enum": "working",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T00:00:00"
+    }
+    mock_session.request.return_value = mock_response
+    
+    url = devin_client.get_session_url("devin-12345")
+    
+    assert url == "https://app.test.com/sessions/12345"
+
+
+def test_get_session_url_handles_session_id_without_prefix(devin_client, mock_session):
+    """
+    Validates that get_session_url works correctly when the session_id
+    doesn't have a 'devin-' prefix (should pass through unchanged).
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "abc123",
+        "status_enum": "working",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T00:00:00"
+    }
+    mock_session.request.return_value = mock_response
+    
+    url = devin_client.get_session_url("abc123")
+    
+    assert url == "https://app.test.com/sessions/abc123"
