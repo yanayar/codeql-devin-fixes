@@ -4,7 +4,7 @@ Devin API client for triggering security fix sessions.
 This client handles communication with the Devin API to create sessions,
 monitor progress, and retrieve results.
 """
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import requests
 import time
 import logging
@@ -376,7 +376,7 @@ class DevinClient:
         session_id: str,
         timeout: int = 3600,
         poll_interval: int = 30,
-        initial_delay: int = 30,
+        initial_delay: int = 0,
         max_polls: int = 500
     ) -> DevinSession:
         """
@@ -386,7 +386,7 @@ class DevinClient:
             session_id: The session identifier
             timeout: Maximum time to wait in seconds (default: 1 hour)
             poll_interval: Time between status checks in seconds (default: 30s)
-            initial_delay: Seconds to wait before starting polling to allow session initialization (default: 30s)
+            initial_delay: Seconds to wait before starting polling to allow session initialization (default: 0s)
             max_polls: Maximum number of polls to prevent infinite loops (default: 500)
 
         Returns:
@@ -455,6 +455,9 @@ class DevinClient:
                 sleep_duration = min(poll_interval, max(0, timeout - elapsed_after_check))
                 logger.info(f"Session {session_id} still in progress, sleeping for {sleep_duration:.1f}s...")
                 time.sleep(sleep_duration)
+
+            except TimeoutError:
+                raise
 
             except DevinClientError as e:
                 if e.status_code == 404:
@@ -577,11 +580,14 @@ class DevinClient:
 
             structured_output = data.get("structured_output", {})
 
-            branch_name = structured_output.get("branch_name") if structured_output else None
-            files_modified = structured_output.get("files_modified", []) if structured_output else []
-            diff = structured_output.get("diff") if structured_output else None
-            commit_messages = structured_output.get("commit_messages", []) if structured_output else []
+            json_summary = structured_output.get("json_summary", {}) if structured_output else {}
+            branch_name = json_summary.get("branch_name") or (structured_output.get("branch_name") if structured_output else None)
+            files_modified = json_summary.get("files_modified", []) or (structured_output.get("files_modified", []) if structured_output else [])
+            commit_messages = json_summary.get("commit_messages", []) or (structured_output.get("commit_messages", []) if structured_output else [])
+            diff = structured_output.get("unified_diff") or (structured_output.get("diff") if structured_output else None)
             summary = structured_output.get("result") if structured_output else None
+
+            logger.info(f"Extracted from structured_output: branch_name={branch_name}, files_modified={len(files_modified)}, diff_present={diff is not None}")
 
             if not diff or not branch_name:
                 logger.info(f"structured_output missing diff or branch_name, attempting fallback parsing")

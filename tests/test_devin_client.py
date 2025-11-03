@@ -346,6 +346,70 @@ def test_get_session_result_success(devin_client, mock_session):
     assert result.pr_url == "https://github.com/test/repo/pull/1"
 
 
+def test_get_session_result_with_structured_output_json_summary(devin_client, mock_session):
+    """
+    Validates that get_session_result correctly extracts data from structured_output
+    with json_summary and unified_diff keys (the actual API response format).
+    Uses real API response data to ensure compatibility.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "session_id": "devin-0e9b5fe2afc244bba48e637bbcf9d860",
+        "status_enum": "blocked",
+        "created_at": "2025-11-03T14:35:23.741147+00:00",
+        "updated_at": "2025-11-03T14:42:09.247512+00:00",
+        "pull_request": None,
+        "structured_output": {
+            "json_summary": {
+                "branch_name": "devin-fixes-0e9b5fe2afc244bba48e637bbcf9d860-batch-1",
+                "files_modified": ["server/routes.py"],
+                "commit_messages": [
+                    "Fix SQL injection vulnerabilities in server/routes.py\n\n"
+                    "- Replace string concatenation with parameterized queries for name search (line 16)\n"
+                    "- Replace string concatenation with parameterized queries for author search (line 22)\n"
+                    "- Use SQLite3 parameter placeholders (?) to prevent SQL injection attacks"
+                ]
+            },
+            "unified_diff": (
+                "diff --git a/server/routes.py b/server/routes.py\n"
+                "index bab7594..df0cbe1 100644\n"
+                "--- a/server/routes.py\n"
+                "+++ b/server/routes.py\n"
+                "@@ -13,13 +13,15 @@ def index():\n"
+                " \n"
+                " if name:\n"
+                " cursor.execute(\n"
+                '- "SELECT * FROM books WHERE name LIKE \'%" + name + "%\'"\n'
+                '+ "SELECT * FROM books WHERE name LIKE ?",\n'
+                "+ ('%' + name + '%',)\n"
+                " )\n"
+                " books = [Book(*row) for row in cursor]\n"
+                " \n"
+                " elif author:\n"
+                " cursor.execute(\n"
+                '- "SELECT * FROM books WHERE author LIKE \'%" + author + "%\'"\n'
+                '+ "SELECT * FROM books WHERE author LIKE ?",\n'
+                "+ ('%' + author + '%',)\n"
+                " )\n"
+                " books = [Book(*row) for row in cursor]"
+            )
+        }
+    }
+    mock_session.request.return_value = mock_response
+    
+    result = devin_client.get_session_result("devin-0e9b5fe2afc244bba48e637bbcf9d860")
+    
+    assert isinstance(result, SessionResult)
+    assert result.branch_name == "devin-fixes-0e9b5fe2afc244bba48e637bbcf9d860-batch-1"
+    assert result.files_modified == ["server/routes.py"]
+    assert len(result.commit_messages) == 1
+    assert "Fix SQL injection vulnerabilities" in result.commit_messages[0]
+    assert result.diff is not None
+    assert "diff --git a/server/routes.py" in result.diff
+    assert len(result.diff) > 100
+
+
 def test_get_session_result_not_completed(devin_client, mock_session):
     """
     Validates that get_session_result raises DevinClientError when called
