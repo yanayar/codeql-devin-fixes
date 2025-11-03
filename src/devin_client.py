@@ -375,7 +375,8 @@ class DevinClient:
         session_id: str,
         timeout: int = 3600,
         poll_interval: int = 30,
-        initial_delay: int = 30
+        initial_delay: int = 30,
+        max_polls: int = 500
     ) -> DevinSession:
         """
         Wait for a Devin session to complete.
@@ -385,15 +386,16 @@ class DevinClient:
             timeout: Maximum time to wait in seconds (default: 1 hour)
             poll_interval: Time between status checks in seconds (default: 30s)
             initial_delay: Seconds to wait before starting polling to allow session initialization (default: 30s)
+            max_polls: Maximum number of polls to prevent infinite loops (default: 500)
 
         Returns:
             DevinSession with final status and results
 
         Raises:
-            TimeoutError: If session doesn't complete within timeout
+            TimeoutError: If session doesn't complete within timeout or max_polls
             DevinClientError: If API request fails
         """
-        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s, poll_interval: {poll_interval}s, initial_delay: {initial_delay}s)")
+        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s, poll_interval: {poll_interval}s, initial_delay: {initial_delay}s, max_polls: {max_polls})")
         
         if initial_delay > 0:
             logger.info(f"Delaying polling start for {initial_delay}s to allow session initialization")
@@ -402,11 +404,17 @@ class DevinClient:
         
         start_time = time.time()
         poll_count = 0
+        blocked_seen = False
 
         while True:
             elapsed = time.time() - start_time
             if elapsed >= timeout:
                 error_msg = f"Session {session_id} did not complete within {timeout}s (after {poll_count} polls)"
+                logger.error(error_msg)
+                raise TimeoutError(error_msg)
+            
+            if poll_count >= max_polls:
+                error_msg = f"Session {session_id} exceeded maximum polls ({max_polls})"
                 logger.error(error_msg)
                 raise TimeoutError(error_msg)
 
@@ -425,6 +433,17 @@ class DevinClient:
                 if session.is_terminal():
                     logger.info(f"Session {session_id} reached terminal state: {session.status.value} (after {poll_count} polls)")
                     return session
+                
+                if raw_status == 'blocked':
+                    if blocked_seen:
+                        logger.info(f"Session {session_id} is blocked (seen twice); treating as completed for this workflow")
+                        session.status = SessionStatus.COMPLETED
+                        return session
+                    else:
+                        logger.info(f"Session {session_id} is blocked (first time); will treat as completed if seen again")
+                        blocked_seen = True
+                else:
+                    blocked_seen = False
 
                 elapsed_after_check = time.time() - start_time
                 if elapsed_after_check >= timeout:
