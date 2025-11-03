@@ -325,13 +325,17 @@ def process_single_batch(
         branch_name = f"codeql-fix/batch-{batch_num}"
         
         logger.info(f"Creating Devin session for batch {batch_num}")
+        
+        secret_ids = None if config.push_mode else []
+        
         session = devin_client.create_session(
             repo_url=repo_url,
             alerts=alerts,
             base_branch=config.base_branch,
             branch_name=branch_name,
             batch_number=batch_num,
-            secret_ids=None,
+            secret_ids=secret_ids,
+            push_mode=config.push_mode,
             title=f"Fix CodeQL alerts (batch {batch_num})"
         )
         
@@ -367,7 +371,29 @@ def process_single_batch(
                 'files_modified': result.files_modified
             }
         
-        if result.branch_name:
+        if not config.push_mode:
+            if not result.diff:
+                logger.error(f"No diff found in session result for batch {batch_num}")
+                return {
+                    'batch_num': batch_num,
+                    'alert_count': len(alerts),
+                    'session_id': session.session_id,
+                    'status': 'failed',
+                    'error': 'No diff found in session result'
+                }
+            
+            logger.info(f"Diff-only mode: creating branch '{branch_name}' and applying diff")
+            github_client.create_branch(
+                branch_name=branch_name,
+                base_branch=config.base_branch
+            )
+            
+            commits = github_client.apply_diff(
+                diff=result.diff,
+                branch=branch_name,
+                commit_message="Fix CodeQL security issues"
+            )
+        elif result.branch_name:
             logger.info(f"Devin pushed branch '{result.branch_name}', checking if it exists on GitHub")
             try:
                 repo_info = github_client.get_repository_info()
