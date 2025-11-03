@@ -10,11 +10,11 @@ on:
         required: false
         default: '5'
       batch_strategy:
-        description: 'Batching strategy (file, severity, rule, count)'
+        description: 'Batching strategy (file or severity)'
         required: false
         default: 'file'
-      dry_run:
-        description: 'Dry run mode (no PRs created)'
+      push_mode:
+        description: 'Enable push mode (Devin pushes branches)'
         required: false
         default: 'false'
 
@@ -53,7 +53,7 @@ jobs:
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '5' }}
           BATCH_STRATEGY: ${{ github.event.inputs.batch_strategy || 'file' }}
           BASE_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
-          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          PUSH_MODE: ${{ github.event.inputs.push_mode || 'false' }}
         run: |
           python src/main.py
       
@@ -62,7 +62,5 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: codeql-fixes-summary
-          path: |
-            summary.json
-            logs/*.log
+          path: summary.json
           retention-days: 30
