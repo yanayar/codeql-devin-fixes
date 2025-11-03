@@ -620,3 +620,205 @@ class GitHubClient:
 
         self.logger.info(f"Permissions: {permissions}")
         return permissions
+
+    def update_file(
+        self,
+        file_path: str,
+        content: str,
+        branch: str,
+        commit_message: str
+    ) -> str:
+        """
+        Update or create a file in the repository.
+
+        Args:
+            file_path: Path to the file in the repository
+            content: New content for the file
+            branch: Branch to update
+            commit_message: Commit message
+
+        Returns:
+            SHA of the commit
+
+        Raises:
+            GitHubClientError: If file update fails
+        """
+        self.logger.info(f"Updating file '{file_path}' on branch '{branch}'")
+
+        try:
+            try:
+                file_obj = self.repo.get_contents(file_path, ref=branch)
+                sha = file_obj.sha
+            except GithubException as e:
+                if e.status == 404:
+                    sha = None
+                else:
+                    raise
+
+            if sha:
+                result = self.repo.update_file(
+                    path=file_path,
+                    message=commit_message,
+                    content=content,
+                    sha=sha,
+                    branch=branch
+                )
+            else:
+                result = self.repo.create_file(
+                    path=file_path,
+                    message=commit_message,
+                    content=content,
+                    branch=branch
+                )
+
+            commit_sha = result['commit'].sha
+            self.logger.info(f"Updated file '{file_path}' with commit {commit_sha[:8]}")
+            return commit_sha
+
+        except GithubException as e:
+            raise GitHubClientError(
+                operation="update_file",
+                message=f"GitHub API error: {e.data.get('message', str(e))}",
+                status_code=e.status
+            )
+        except Exception as e:
+            raise GitHubClientError(
+                operation="update_file",
+                message=f"Unexpected error: {str(e)}"
+            )
+
+    def apply_diff(
+        self,
+        diff: str,
+        branch: str,
+        commit_message: str = "Apply security fixes"
+    ) -> List[str]:
+        """
+        Apply a unified diff to the repository.
+
+        Args:
+            diff: Unified diff string
+            branch: Branch to apply changes to
+            commit_message: Commit message for the changes
+
+        Returns:
+            List of commit SHAs created
+
+        Raises:
+            GitHubClientError: If applying diff fails
+
+        Note:
+            This method parses the unified diff and updates each file individually.
+            For complex diffs with multiple files, this may create multiple commits.
+        """
+        self.logger.info(f"Applying diff to branch '{branch}'")
+
+        try:
+            import re
+            
+            file_diffs = re.split(r'\ndiff --git ', diff)
+            if file_diffs[0].startswith('diff --git '):
+                file_diffs[0] = file_diffs[0][11:]
+            else:
+                file_diffs = file_diffs[1:]
+
+            commits = []
+            
+            for file_diff in file_diffs:
+                if not file_diff.strip():
+                    continue
+
+                lines = file_diff.split('\n')
+                file_path_match = re.match(r'a/(.*?) b/', lines[0])
+                if not file_path_match:
+                    self.logger.warning(f"Could not parse file path from diff: {lines[0]}")
+                    continue
+
+                file_path = file_path_match.group(1)
+
+                try:
+                    file_obj = self.repo.get_contents(file_path, ref=branch)
+                    current_content = file_obj.decoded_content.decode('utf-8')
+                except GithubException as e:
+                    if e.status == 404:
+                        self.logger.warning(f"File '{file_path}' not found, skipping")
+                        continue
+                    raise
+
+                new_content = self._apply_patch_to_content(current_content, file_diff)
+                
+                commit_sha = self.update_file(
+                    file_path=file_path,
+                    content=new_content,
+                    branch=branch,
+                    commit_message=f"{commit_message}: {file_path}"
+                )
+                commits.append(commit_sha)
+
+            self.logger.info(f"Applied diff with {len(commits)} commits")
+            return commits
+
+        except GitHubClientError:
+            raise
+        except Exception as e:
+            raise GitHubClientError(
+                operation="apply_diff",
+                message=f"Unexpected error: {str(e)}"
+            )
+
+    def _apply_patch_to_content(self, content: str, patch: str) -> str:
+        """
+        Apply a patch to file content.
+
+        Args:
+            content: Original file content
+            patch: Unified diff patch for this file
+
+        Returns:
+            Modified content
+
+        Note:
+            This is a simplified patch application that handles basic unified diffs.
+            For complex patches, consider using a proper patch library.
+        """
+        import re
+        
+        lines = content.split('\n')
+        patch_lines = patch.split('\n')
+        
+        result_lines = []
+        content_idx = 0
+        i = 0
+        
+        while i < len(patch_lines):
+            line = patch_lines[i]
+            
+            if line.startswith('@@'):
+                hunk_match = re.match(r'@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@', line)
+                if hunk_match:
+                    old_start = int(hunk_match.group(1)) - 1
+                    new_start = int(hunk_match.group(3)) - 1
+                    
+                    while content_idx < old_start and content_idx < len(lines):
+                        result_lines.append(lines[content_idx])
+                        content_idx += 1
+                    
+                    i += 1
+                    while i < len(patch_lines) and not patch_lines[i].startswith('@@'):
+                        pline = patch_lines[i]
+                        if pline.startswith('-'):
+                            content_idx += 1
+                        elif pline.startswith('+'):
+                            result_lines.append(pline[1:])
+                        elif pline.startswith(' '):
+                            result_lines.append(pline[1:])
+                            content_idx += 1
+                        i += 1
+                    continue
+            i += 1
+        
+        while content_idx < len(lines):
+            result_lines.append(lines[content_idx])
+            content_idx += 1
+        
+        return '\n'.join(result_lines)

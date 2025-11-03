@@ -114,19 +114,23 @@ def initialize_github_client(config: Config) -> GitHubClient:
         3. Log repository information
     """
     logger.info(f"Initializing GitHub client for {config.github_repository}")
-    github_client = GitHubClient(
+    
+    client = GitHubClient(
         token=config.github_token,
         repo_name=config.github_repository
     )
     
-    repo_info = github_client.get_repository_info()
+    repo_info = client.get_repository_info()
     logger.info(f"Connected to repository: {repo_info['full_name']}")
     logger.info(f"Default branch: {repo_info['default_branch']}")
     
-    permissions = github_client.check_permissions()
-    logger.info(f"Permissions: {permissions}")
+    permissions = client.check_permissions()
+    if not permissions['can_read_alerts']:
+        logger.warning("Token may not have permission to read code scanning alerts")
+    if not permissions['can_create_branches'] or not permissions['can_create_prs']:
+        logger.warning("Token may not have permission to create branches or PRs")
     
-    return github_client
+    return client
 
 
 def initialize_devin_client(config: Config) -> DevinClient:
@@ -142,12 +146,14 @@ def initialize_devin_client(config: Config) -> DevinClient:
     Note:
         This should create DevinClient with API key and base URL
     """
-    logger.info("Initializing Devin client")
-    devin_client = DevinClient(
+    logger.info("Initializing Devin API client")
+    
+    client = DevinClient(
         api_key=config.devin_api_key,
         base_url=config.devin_api_url
     )
-    return devin_client
+    
+    return client
 
 
 def fetch_alerts(github_client: GitHubClient) -> List[CodeQLAlert]:
@@ -170,6 +176,7 @@ def fetch_alerts(github_client: GitHubClient) -> List[CodeQLAlert]:
         3. Log alert summary (count by severity, etc.)
     """
     logger.info("Fetching open CodeQL alerts")
+    
     alerts = github_client.fetch_codeql_alerts(state="open")
     
     if alerts:
@@ -177,7 +184,7 @@ def fetch_alerts(github_client: GitHubClient) -> List[CodeQLAlert]:
         for alert in alerts:
             sev = alert.severity.lower()
             severity_counts[sev] = severity_counts.get(sev, 0) + 1
-        logger.info(f"Alert severity breakdown: {severity_counts}")
+        logger.info(f"Found {len(alerts)} open alerts: {severity_counts}")
     
     return alerts
 
@@ -270,7 +277,7 @@ def process_batches(
             results.append({
                 'batch_num': i,
                 'alert_count': len(batch),
-                'status': 'error',
+                'status': 'failed',
                 'error': str(e)
             })
     
@@ -315,70 +322,182 @@ def process_single_batch(
         repo_info = github_client.get_repository_info()
         repo_url = repo_info['clone_url']
         
+        branch_name = f"codeql-fix/batch-{batch_num}"
+        
         logger.info(f"Creating Devin session for batch {batch_num}")
         session = devin_client.create_session(
             repo_url=repo_url,
             alerts=alerts,
+            base_branch=config.base_branch,
+            branch_name=branch_name,
+            batch_number=batch_num,
+            secret_ids=None,
+            title=f"Fix CodeQL alerts (batch {batch_num})"
+        )
+        
+        branch_name = f"codeql-fix/batch-{batch_num}-{session.session_id}"
+        
+        logger.info(f"Waiting for Devin session {session.session_id} to complete")
+        completed_session = devin_client.wait_for_completion(
+            session_id=session.session_id,
+            timeout=3600,
+            poll_interval=30
+        )
+        
+        if not completed_session.is_successful():
+            return {
+                'batch_num': batch_num,
+                'alert_count': len(alerts),
+                'session_id': session.session_id,
+                'status': 'failed',
+                'error': f"Session failed with status: {completed_session.status.value}"
+            }
+        
+        result = devin_client.get_session_result(session.session_id)
+        
+        if config.dry_run:
+            logger.info(f"Dry run mode: skipping PR creation for batch {batch_num}")
+            return {
+                'batch_num': batch_num,
+                'alert_count': len(alerts),
+                'session_id': session.session_id,
+                'status': 'success',
+                'dry_run': True,
+                'branch_name': result.branch_name or branch_name,
+                'files_modified': result.files_modified
+            }
+        
+        if result.branch_name:
+            logger.info(f"Devin pushed branch '{result.branch_name}', checking if it exists on GitHub")
+            try:
+                repo_info = github_client.get_repository_info()
+                repo = github_client.repo
+                try:
+                    repo.get_git_ref(f'heads/{result.branch_name}')
+                    logger.info(f"Branch '{result.branch_name}' exists on GitHub, skipping create_branch and apply_diff")
+                    branch_name = result.branch_name
+                    commits = result.commit_messages or []
+                except Exception as e:
+                    logger.warning(f"Branch '{result.branch_name}' not found on GitHub: {e}")
+                    logger.info(f"Falling back to apply_diff workflow")
+                    if not result.diff:
+                        logger.error(f"No diff found and branch not pushed for batch {batch_num}")
+                        return {
+                            'batch_num': batch_num,
+                            'alert_count': len(alerts),
+                            'session_id': session.session_id,
+                            'status': 'failed',
+                            'error': 'No diff found and branch not pushed'
+                        }
+                    
+                    logger.info(f"Creating branch '{branch_name}' for batch {batch_num}")
+                    github_client.create_branch(
+                        branch_name=branch_name,
+                        base_branch=config.base_branch
+                    )
+                    
+                    logger.info(f"Applying diff to branch '{branch_name}'")
+                    commits = github_client.apply_diff(
+                        diff=result.diff,
+                        branch=branch_name,
+                        commit_message="Fix CodeQL security issues"
+                    )
+            except Exception as e:
+                logger.error(f"Error checking if branch exists: {e}")
+                if not result.diff:
+                    logger.error(f"No diff found and cannot verify branch for batch {batch_num}")
+                    return {
+                        'batch_num': batch_num,
+                        'alert_count': len(alerts),
+                        'session_id': session.session_id,
+                        'status': 'failed',
+                        'error': f'No diff found and cannot verify branch: {str(e)}'
+                    }
+                
+                logger.info(f"Creating branch '{branch_name}' for batch {batch_num}")
+                github_client.create_branch(
+                    branch_name=branch_name,
+                    base_branch=config.base_branch
+                )
+                
+                logger.info(f"Applying diff to branch '{branch_name}'")
+                commits = github_client.apply_diff(
+                    diff=result.diff,
+                    branch=branch_name,
+                    commit_message="Fix CodeQL security issues"
+                )
+        else:
+            if not result.diff:
+                logger.warning(f"No diff found in session result for batch {batch_num}")
+                return {
+                    'batch_num': batch_num,
+                    'alert_count': len(alerts),
+                    'session_id': session.session_id,
+                    'status': 'failed',
+                    'error': 'No diff found in session result'
+                }
+            
+            logger.info(f"Creating branch '{branch_name}' for batch {batch_num}")
+            github_client.create_branch(
+                branch_name=branch_name,
+                base_branch=config.base_branch
+            )
+            
+            logger.info(f"Applying diff to branch '{branch_name}'")
+            commits = github_client.apply_diff(
+                diff=result.diff,
+                branch=branch_name,
+                commit_message="Fix CodeQL security issues"
+            )
+        
+        pr_title = f"Fix CodeQL security alerts (batch {batch_num})"
+        pr_body = f"""## CodeQL Security Fixes
+
+This PR addresses {len(alerts)} CodeQL security alert(s) identified in the repository.
+
+"""
+        for i, alert in enumerate(alerts, 1):
+            pr_body += f"\n{i}. **{alert.rule_id}** ({alert.severity})"
+            pr_body += f"\n   - File: `{alert.file_path}:{alert.line_number}`"
+            pr_body += f"\n   - Issue: {alert.message}"
+        
+        pr_body += f"\n\n### Changes\n"
+        pr_body += f"- Files modified: {len(result.files_modified)}\n"
+        pr_body += f"- Commits: {len(commits)}\n"
+        
+        if result.summary:
+            pr_body += f"\n### Summary\n{result.summary}\n"
+        
+        pr_body += f"\n---\n"
+        pr_body += f"Generated by automated CodeQL fixes workflow\n"
+        pr_body += f"Devin session: {devin_client.get_session_url(session.session_id)}\n"
+        
+        logger.info(f"Creating PR for batch {batch_num}")
+        pr = github_client.create_pull_request(
+            branch=branch_name,
+            title=pr_title,
+            body=pr_body,
             base_branch=config.base_branch
         )
         
-        logger.info(f"Session created: {session.session_id}")
-        session_url = devin_client.get_session_url(session.session_id)
-        logger.info(f"Session URL: {session_url}")
-        
-        if config.dry_run:
-            logger.info("Dry run mode: skipping wait for completion")
-            return {
-                'batch_num': batch_num,
-                'alert_count': len(alerts),
-                'session_id': session.session_id,
-                'session_url': session_url,
-                'status': 'dry_run',
-                'pr_url': None
-            }
-        
-        logger.info(f"Waiting for session {session.session_id} to complete")
-        completed_session = devin_client.wait_for_completion(session.session_id)
-        
-        if completed_session.is_successful():
-            result = devin_client.get_session_result(session.session_id)
-            return {
-                'batch_num': batch_num,
-                'alert_count': len(alerts),
-                'session_id': session.session_id,
-                'session_url': session_url,
-                'status': 'success',
-                'pr_url': result.pr_url,
-                'summary': result.summary
-            }
-        else:
-            error_msg = completed_session.error_message or f"Session ended with status: {completed_session.status.value}"
-            return {
-                'batch_num': batch_num,
-                'alert_count': len(alerts),
-                'session_id': session.session_id,
-                'session_url': session_url,
-                'status': 'failed',
-                'error': error_msg
-            }
-    
-    except TimeoutError as e:
-        logger.error(f"Batch {batch_num} timed out: {e}")
         return {
             'batch_num': batch_num,
             'alert_count': len(alerts),
-            'session_id': session.session_id if 'session' in locals() else None,
-            'session_url': session_url if 'session_url' in locals() else None,
-            'status': 'timeout',
-            'error': f"Session timed out: {str(e)}"
+            'session_id': session.session_id,
+            'status': 'success',
+            'pr_url': pr.html_url,
+            'pr_number': pr.number,
+            'branch_name': branch_name,
+            'commits': commits,
+            'files_modified': result.files_modified
         }
-            
+        
     except Exception as e:
         logger.error(f"Error processing batch {batch_num}: {e}", exc_info=True)
         return {
             'batch_num': batch_num,
             'alert_count': len(alerts),
-            'status': 'error',
+            'status': 'failed',
             'error': str(e)
         }
 
@@ -409,14 +528,18 @@ def generate_summary(results: List[Dict[str, Any]], config: Config) -> None:
     from datetime import datetime
     
     total_alerts = sum(r.get('alert_count', 0) for r in results)
-    total_batches = len(results)
     successful_batches = sum(1 for r in results if r.get('status') == 'success')
-    failed_batches = sum(1 for r in results if r.get('status') in ['failed', 'error'])
-    timeout_batches = sum(1 for r in results if r.get('status') == 'timeout')
-    dry_run_batches = sum(1 for r in results if r.get('status') == 'dry_run')
+    failed_batches = sum(1 for r in results if r.get('status') == 'failed')
     
-    pr_urls = [r.get('pr_url') for r in results if r.get('pr_url')]
-    session_urls = [r.get('session_url') for r in results if r.get('session_url')]
+    prs_created = [
+        {
+            'batch_num': r['batch_num'],
+            'pr_url': r['pr_url'],
+            'pr_number': r.get('pr_number'),
+            'alerts_fixed': r.get('alert_count')
+        }
+        for r in results if r.get('pr_url')
+    ]
     
     summary = {
         'timestamp': datetime.utcnow().isoformat(),
@@ -425,15 +548,13 @@ def generate_summary(results: List[Dict[str, Any]], config: Config) -> None:
         'batch_size': config.batch_size,
         'dry_run': config.dry_run,
         'statistics': {
-            'total_alerts': total_alerts,
-            'total_batches': total_batches,
+            'total_batches': len(results),
             'successful_batches': successful_batches,
             'failed_batches': failed_batches,
-            'timeout_batches': timeout_batches,
-            'dry_run_batches': dry_run_batches
+            'total_alerts_processed': total_alerts,
+            'prs_created': len(prs_created)
         },
-        'pr_urls': pr_urls,
-        'session_urls': session_urls,
+        'pull_requests': prs_created,
         'results': results
     }
     
@@ -444,24 +565,22 @@ def generate_summary(results: List[Dict[str, Any]], config: Config) -> None:
     logger.info("WORKFLOW SUMMARY")
     logger.info("=" * 60)
     logger.info(f"Repository: {config.github_repository}")
+    logger.info(f"Total batches: {len(results)}")
+    logger.info(f"Successful: {successful_batches}")
+    logger.info(f"Failed: {failed_batches}")
     logger.info(f"Total alerts processed: {total_alerts}")
-    logger.info(f"Total batches: {total_batches}")
-    logger.info(f"Successful batches: {successful_batches}")
-    logger.info(f"Failed batches: {failed_batches}")
-    if timeout_batches > 0:
-        logger.info(f"Timeout batches: {timeout_batches}")
-    if dry_run_batches > 0:
-        logger.info(f"Dry run batches: {dry_run_batches}")
+    logger.info(f"PRs created: {len(prs_created)}")
     
-    if pr_urls:
-        logger.info(f"PRs created: {len(pr_urls)}")
-        for pr_url in pr_urls:
-            logger.info(f"  - {pr_url}")
+    if prs_created:
+        logger.info("\nPull Requests:")
+        for pr in prs_created:
+            logger.info(f"  - Batch {pr['batch_num']}: {pr['pr_url']}")
     
-    if session_urls:
-        logger.info(f"Devin sessions: {len(session_urls)}")
-        for session_url in session_urls:
-            logger.info(f"  - {session_url}")
+    if failed_batches > 0:
+        logger.info("\nFailed batches:")
+        for r in results:
+            if r.get('status') == 'failed':
+                logger.info(f"  - Batch {r['batch_num']}: {r.get('error', 'Unknown error')}")
     
     logger.info("=" * 60)
     logger.info(f"Summary saved to summary.json")

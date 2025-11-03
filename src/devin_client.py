@@ -4,7 +4,7 @@ Devin API client for triggering security fix sessions.
 This client handles communication with the Devin API to create sessions,
 monitor progress, and retrieve results.
 """
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import requests
 import time
 import logging
@@ -191,6 +191,8 @@ class DevinClient:
         alerts: List[CodeQLAlert],
         instructions: Optional[str] = None,
         base_branch: str = "main",
+        branch_name: Optional[str] = None,
+        batch_number: Optional[int] = None,
         idempotent: bool = False,
         secret_ids: Optional[List[str]] = None,
         title: Optional[str] = None,
@@ -204,6 +206,7 @@ class DevinClient:
             alerts: List of CodeQL alerts to address
             instructions: Optional custom instructions for Devin
             base_branch: Base branch to work from
+            branch_name: Optional branch name for Devin to commit changes to
             idempotent: Enable idempotent session creation (default: False)
             secret_ids: List of secret IDs to use (None = all secrets, [] = no secrets)
             title: Custom title for the session
@@ -227,7 +230,7 @@ class DevinClient:
         logger.info(f"Creating Devin session for {len(alerts)} alerts in {repo_url}")
 
         task_description = instructions or self._format_task_description(
-            repo_url, alerts, base_branch
+            repo_url, alerts, base_branch, branch_name, batch_number
         )
 
         payload = {
@@ -373,7 +376,8 @@ class DevinClient:
         session_id: str,
         timeout: int = 3600,
         poll_interval: int = 30,
-        initial_delay: int = 30
+        initial_delay: int = 0,
+        max_polls: int = 500
     ) -> DevinSession:
         """
         Wait for a Devin session to complete.
@@ -382,16 +386,17 @@ class DevinClient:
             session_id: The session identifier
             timeout: Maximum time to wait in seconds (default: 1 hour)
             poll_interval: Time between status checks in seconds (default: 30s)
-            initial_delay: Seconds to wait before starting polling to allow session initialization (default: 30s)
+            initial_delay: Seconds to wait before starting polling to allow session initialization (default: 0s)
+            max_polls: Maximum number of polls to prevent infinite loops (default: 500)
 
         Returns:
             DevinSession with final status and results
 
         Raises:
-            TimeoutError: If session doesn't complete within timeout
+            TimeoutError: If session doesn't complete within timeout or max_polls
             DevinClientError: If API request fails
         """
-        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s, poll_interval: {poll_interval}s, initial_delay: {initial_delay}s)")
+        logger.info(f"Waiting for session {session_id} to complete (timeout: {timeout}s, poll_interval: {poll_interval}s, initial_delay: {initial_delay}s, max_polls: {max_polls})")
         
         if initial_delay > 0:
             logger.info(f"Delaying polling start for {initial_delay}s to allow session initialization")
@@ -400,11 +405,17 @@ class DevinClient:
         
         start_time = time.time()
         poll_count = 0
+        blocked_seen = False
 
         while True:
             elapsed = time.time() - start_time
             if elapsed >= timeout:
                 error_msg = f"Session {session_id} did not complete within {timeout}s (after {poll_count} polls)"
+                logger.error(error_msg)
+                raise TimeoutError(error_msg)
+            
+            if poll_count >= max_polls:
+                error_msg = f"Session {session_id} exceeded maximum polls ({max_polls})"
                 logger.error(error_msg)
                 raise TimeoutError(error_msg)
 
@@ -423,6 +434,17 @@ class DevinClient:
                 if session.is_terminal():
                     logger.info(f"Session {session_id} reached terminal state: {session.status.value} (after {poll_count} polls)")
                     return session
+                
+                if raw_status == 'blocked':
+                    if blocked_seen:
+                        logger.info(f"Session {session_id} is blocked (seen twice); treating as completed for this workflow")
+                        session.status = SessionStatus.COMPLETED
+                        return session
+                    else:
+                        logger.info(f"Session {session_id} is blocked (first time); will treat as completed if seen again")
+                        blocked_seen = True
+                else:
+                    blocked_seen = False
 
                 elapsed_after_check = time.time() - start_time
                 if elapsed_after_check >= timeout:
@@ -433,6 +455,9 @@ class DevinClient:
                 sleep_duration = min(poll_interval, max(0, timeout - elapsed_after_check))
                 logger.info(f"Session {session_id} still in progress, sleeping for {sleep_duration:.1f}s...")
                 time.sleep(sleep_duration)
+
+            except TimeoutError:
+                raise
 
             except DevinClientError as e:
                 if e.status_code == 404:
@@ -453,6 +478,65 @@ class DevinClient:
                     session_id=session_id
                 )
 
+    def _parse_devin_output(self, text: str) -> Dict[str, Any]:
+        """
+        Parse Devin's output text to extract JSON summary and unified diff.
+        
+        Args:
+            text: Raw text output from Devin
+            
+        Returns:
+            Dictionary with parsed 'json_data' and 'diff' keys
+            
+        Raises:
+            ValueError: If parsing fails
+        """
+        import json
+        import re
+        
+        result = {'json_data': None, 'diff': None}
+        
+        text_lower = text.lower()
+        json_summary_idx = text_lower.find('json summary')
+        unified_diff_idx = text_lower.find('unified diff')
+        
+        if json_summary_idx == -1:
+            logger.warning("Could not find 'JSON Summary' header in output")
+            return result
+        
+        json_start = json_summary_idx + len('json summary')
+        json_end = unified_diff_idx if unified_diff_idx != -1 else len(text)
+        json_section = text[json_start:json_end].strip()
+        
+        json_section = json_section.strip('`').strip()
+        
+        brace_start = json_section.find('{')
+        brace_end = json_section.rfind('}')
+        
+        if brace_start != -1 and brace_end != -1:
+            json_str = json_section[brace_start:brace_end + 1]
+            try:
+                result['json_data'] = json.loads(json_str)
+                logger.info(f"Successfully parsed JSON summary: {list(result['json_data'].keys())}")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON: {e}")
+                logger.debug(f"JSON string attempted: {json_str[:200]}")
+        
+        if unified_diff_idx != -1:
+            diff_start = unified_diff_idx + len('unified diff')
+            diff_section = text[diff_start:].strip()
+            
+            diff_section = diff_section.strip('`').strip()
+            
+            diff_match = re.search(r'^diff --git', diff_section, re.MULTILINE)
+            if diff_match:
+                result['diff'] = diff_section[diff_match.start():]
+                logger.info(f"Successfully extracted diff: {len(result['diff'])} characters")
+            else:
+                logger.warning("Could not find 'diff --git' in Unified Diff section")
+        
+        return result
+
     def get_session_result(self, session_id: str) -> SessionResult:
         """
         Retrieve the result of a completed session.
@@ -470,15 +554,19 @@ class DevinClient:
 
         try:
             session = self.get_session_status(session_id)
+            raw_status = session.metadata.get('raw_status', 'unknown')
 
-            if not session.is_successful():
-                error_msg = f"Session is not completed successfully (status: {session.status.value})"
+            if not session.is_successful() and raw_status != 'blocked':
+                error_msg = f"Session is not completed successfully (status: {session.status.value}, raw_status: {raw_status})"
                 logger.error(error_msg)
                 raise DevinClientError(
                     operation="get_session_result",
                     message=error_msg,
                     session_id=session_id
                 )
+            
+            if raw_status == 'blocked':
+                logger.info(f"Session {session_id} is blocked; treating as completed for automation workflow")
 
             if session.result:
                 logger.info(f"Retrieved result for session {session_id}")
@@ -492,16 +580,61 @@ class DevinClient:
 
             structured_output = data.get("structured_output", {})
 
+            json_summary = structured_output.get("json_summary", {}) if structured_output else {}
+            branch_name = json_summary.get("branch_name") or (structured_output.get("branch_name") if structured_output else None)
+            files_modified = json_summary.get("files_modified", []) or (structured_output.get("files_modified", []) if structured_output else [])
+            commit_messages = json_summary.get("commit_messages", []) or (structured_output.get("commit_messages", []) if structured_output else [])
+            diff = structured_output.get("unified_diff") or (structured_output.get("diff") if structured_output else None)
+            summary = structured_output.get("result") if structured_output else None
+
+            logger.info(f"Extracted from structured_output: branch_name={branch_name}, files_modified={len(files_modified)}, diff_present={diff is not None}")
+
+            if not diff or not branch_name:
+                logger.info(f"structured_output missing diff or branch_name, attempting fallback parsing")
+                logger.debug(f"Available response keys: {list(data.keys())}")
+                
+                raw_text = None
+                for key in ['output', 'result', 'text', 'content', 'message', 'transcript']:
+                    if key in data and data[key]:
+                        raw_text = data[key]
+                        logger.info(f"Found raw text in field '{key}'")
+                        break
+                
+                if raw_text:
+                    parsed = self._parse_devin_output(raw_text)
+                    
+                    if parsed['json_data']:
+                        branch_name = branch_name or parsed['json_data'].get('branch_name')
+                        files_modified = files_modified or parsed['json_data'].get('files_modified', [])
+                        commit_messages = commit_messages or parsed['json_data'].get('commit_messages', [])
+                        logger.info(f"Extracted from fallback parser: branch={branch_name}, files={len(files_modified)}")
+                    
+                    if parsed['diff']:
+                        diff = diff or parsed['diff']
+                        logger.info(f"Extracted diff from fallback parser: {len(diff)} characters")
+                else:
+                    logger.warning(f"Could not find raw text output in response for fallback parsing")
+
             result = SessionResult(
                 pr_url=pr_url,
-                branch_name=None,
+                branch_name=branch_name,
                 commits=[],
-                files_modified=[],
-                alerts_fixed=0,
-                summary=structured_output.get("result") if structured_output else None
+                files_modified=files_modified,
+                alerts_fixed=len(files_modified) if files_modified else 0,
+                summary=summary,
+                diff=diff,
+                commit_messages=commit_messages
             )
 
-            logger.info(f"Retrieved result for session {session_id}: PR={pr_url}")
+            if raw_status == 'blocked' and not pr_url and not structured_output and not diff:
+                logger.warning(f"Session {session_id} is blocked but has no pull_request, structured_output, or diff data")
+                raise DevinClientError(
+                    operation="get_session_result",
+                    message=f"Session is blocked but no usable result data available (no PR, structured output, or diff)",
+                    session_id=session_id
+                )
+
+            logger.info(f"Retrieved result for session {session_id}: branch={branch_name}, files={len(files_modified)}, pr_url={pr_url}, diff_len={len(diff) if diff else 0}")
             return result
 
         except DevinClientError:
@@ -567,7 +700,9 @@ class DevinClient:
         self,
         repo_url: str,
         alerts: List[CodeQLAlert],
-        base_branch: str
+        base_branch: str,
+        branch_name: Optional[str] = None,
+        batch_number: Optional[int] = None
     ) -> str:
         """
         Format a task description for Devin from CodeQL alerts.
@@ -576,6 +711,8 @@ class DevinClient:
             repo_url: URL of the repository to fix
             alerts: List of alerts to fix
             base_branch: Base branch to work from
+            branch_name: Optional branch name pattern for Devin to use
+            batch_number: Optional batch number for branch naming
 
         Returns:
             Formatted task description string
@@ -601,7 +738,47 @@ class DevinClient:
         lines.append("1. Clone the repository and checkout the base branch")
         lines.append("2. Fix all listed security issues")
         lines.append("3. Run tests to ensure fixes don't break functionality")
-        lines.append(f"4. Create a PR with your changes against {base_branch}")
+        
+        if branch_name:
+            lines.append("4. Create a new branch, commit your changes, and push the branch to origin")
+            lines.append("")
+            lines.append("BRANCH NAMING:")
+            if batch_number is not None:
+                lines.append(f"- Branch name format: devin-fixes-{{session_id}}-batch-{batch_number}")
+                lines.append("- Use THIS session's ID from the session URL (if it starts with 'devin-', drop that prefix)")
+                lines.append(f"- Example: if session ID is 'devin-abc123', use branch name 'devin-fixes-abc123-batch-{batch_number}'")
+            else:
+                lines.append(f"- Use branch name: {branch_name}")
+            lines.append("")
+            lines.append("IMPORTANT CONSTRAINTS:")
+            lines.append("- Do NOT create or open a pull request")
+            lines.append("- DO push the branch to origin after committing")
+            lines.append("- The GitHub Client will handle PR creation")
+            lines.append("")
+            lines.append("OUTPUT REQUIREMENTS:")
+            lines.append("Output EXACTLY the following two sections in plain text (NO markdown code blocks, NO backticks):")
+            lines.append("")
+            lines.append("JSON Summary")
+            lines.append("{")
+            if batch_number is not None:
+                lines.append(f'  "branch_name": "devin-fixes-{{session_id}}-batch-{batch_number}",')
+            else:
+                lines.append(f'  "branch_name": "{branch_name}",')
+            lines.append('  "files_modified": ["file1.py", "file2.py"],')
+            lines.append('  "commit_messages": ["commit message 1", "commit message 2"]')
+            lines.append("}")
+            lines.append("")
+            lines.append("Unified Diff")
+            lines.append("diff --git a/file1.py b/file1.py")
+            lines.append("index abc123..def456 100644")
+            lines.append("--- a/file1.py")
+            lines.append("+++ b/file1.py")
+            lines.append("[actual diff content here]")
+            lines.append("")
+            lines.append("CRITICAL: Do NOT wrap the output in markdown code blocks. Output plain text only.")
+            lines.append("STOP after outputting the JSON Summary and Unified Diff sections. Do not perform any other actions.")
+        else:
+            lines.append(f"4. Create a PR with your changes against {base_branch}")
 
         return "\n".join(lines)
     

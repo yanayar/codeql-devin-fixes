@@ -28,6 +28,8 @@ class SessionResult:
         files_modified: List of files that were modified
         alerts_fixed: Number of alerts addressed
         summary: Human-readable summary of changes
+        diff: Unified diff of all changes
+        commit_messages: List of commit messages
     """
     pr_url: Optional[str] = None
     branch_name: Optional[str] = None
@@ -35,6 +37,8 @@ class SessionResult:
     files_modified: List[str] = field(default_factory=list)
     alerts_fixed: int = 0
     summary: Optional[str] = None
+    diff: Optional[str] = None
+    commit_messages: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert result to dictionary format."""
@@ -45,6 +49,8 @@ class SessionResult:
             'files_modified': self.files_modified,
             'alerts_fixed': self.alerts_fixed,
             'summary': self.summary,
+            'diff': self.diff,
+            'commit_messages': self.commit_messages,
         }
 
 
