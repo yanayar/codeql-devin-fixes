@@ -191,7 +191,7 @@ class DevinClient:
         alerts: List[CodeQLAlert],
         instructions: Optional[str] = None,
         base_branch: str = "main",
-        branch_name: Optional[str] = None,
+        branch_name: str = "",
         batch_number: Optional[int] = None,
         idempotent: bool = False,
         secret_ids: Optional[List[str]] = None,
