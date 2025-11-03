@@ -9,10 +9,10 @@ This GitHub Action fetches open CodeQL alerts from your repository, batches them
 ## Features
 
 - **Automated Security Fixes**: Automatically fix CodeQL security issues using Devin AI
-- **Intelligent Batching**: Group alerts by file, severity, rule type, or count
+- **Intelligent Batching**: Group alerts by file or severity
 - **Pull Request Creation**: Automatically create PRs with fixes for easy review
-- **Configurable**: Customize batch size, strategy, and other settings
-- **Dry Run Mode**: Test the workflow without creating actual PRs
+- **Configurable**: Customize batch size, strategy, push mode, and other settings
+- **Flexible Workflow**: Supports both push mode (Devin pushes branches) and diff-only mode
 
 ## Architecture
 
@@ -22,12 +22,14 @@ For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 1. GitHub Action triggers (scheduled or manual)
 2. Fetch open CodeQL alerts via GitHub API
-3. Batch alerts using configured strategy
+3. Batch alerts using configured strategy (file or severity)
 4. For each batch:
-   - Create a Devin session with alert details
-   - Wait for Devin to generate fixes
-   - Create a pull request with the fixes
-5. Generate summary report
+   - Create a Devin session with alert details and repository URL
+   - Wait for Devin to fix code and push branch (or generate diff)
+   - Poll session status; treat "blocked" as terminal state after seen twice
+   - Verify pushed branch exists or apply diff to new branch
+   - Create pull request automatically with alert details and session link
+5. Generate summary.json with results and PR links
 
 ### Module Structure
 
@@ -80,7 +82,7 @@ The GitHub Action needs these permissions:
 2. Configure the workflow schedule or trigger manually
 3. Set required secrets in repository settings
 
-The action will run automatically based on the schedule or can be triggered manually from the Actions tab.
+The action runs automatically based on the schedule or can be triggered manually from the Actions tab.
 
 ## Usage
 
@@ -104,9 +106,9 @@ The action runs automatically based on the configured schedule. You can also tri
 2. Select "CodeQL Fixes with Devin"
 3. Click "Run workflow"
 4. Configure options (optional):
-   - Batch size
-   - Batch strategy
-   - Dry run mode
+   - Batch size (default: 5)
+   - Batch strategy (file or severity, default: file)
+   - Push mode (enable Devin branch pushing, default: false)
 
 ## Configuration Options
 
@@ -216,45 +218,6 @@ Prioritizes fixing the most critical security issues first, regardless of file l
 └── README.md                   # This file
 ```
 
-### Implementation Status
-
-This project currently contains stub implementations with comprehensive docstrings. The following components need to be implemented:
-
-#### GitHub Client (`src/github_client.py`)
-- [ ] `fetch_codeql_alerts()` - Fetch alerts from GitHub Code Scanning API
-- [ ] `get_alert_details()` - Get detailed alert information
-- [ ] `create_branch()` - Create branch for fixes
-- [ ] `create_pull_request()` - Create PR with fixes
-- [ ] `add_pr_comment()` - Add comments to PRs
-- [ ] `check_permissions()` - Verify token permissions
-
-#### Devin Client (`src/devin_client.py`)
-- [ ] `create_session()` - Create Devin session via API
-- [ ] `get_session_status()` - Check session status
-- [ ] `wait_for_completion()` - Poll until session completes
-- [ ] `get_session_result()` - Retrieve session results
-- [ ] `cancel_session()` - Cancel running session
-
-#### Batch Strategy (`src/batch_strategy.py`)
-- [x] `batch_by_file()` - Group by file (implemented)
-- [x] `batch_by_severity()` - Group by severity (implemented)
-- [x] `create_batches()` - Main batching function (implemented)
-
-#### Main Orchestrator (`src/main.py`)
-- [ ] `load_config()` - Load and validate configuration
-- [ ] `initialize_github_client()` - Initialize GitHub client
-- [ ] `initialize_devin_client()` - Initialize Devin client
-- [ ] `fetch_alerts()` - Fetch alerts from GitHub
-- [ ] `batch_alerts()` - Batch alerts using strategy
-- [ ] `process_batches()` - Process all batches
-- [ ] `process_single_batch()` - Process one batch
-- [ ] `generate_summary()` - Generate summary report
-
-#### Data Models (`src/models/`)
-- [ ] `CodeQLAlert.from_github_alert()` - Parse GitHub API response
-- [ ] `CodeQLAlert.get_context_lines()` - Extract code context
-- [ ] `DevinSession.from_api_response()` - Parse Devin API response
-
 ### Running Tests
 
 ```bash
@@ -269,24 +232,27 @@ This project follows Python best practices:
 - No hardcoded credentials (use environment variables)
 - Modular design for testability
 
-## API Integration Notes
+## API Integration
 
 ### GitHub Code Scanning API
 
-The GitHub client will use the Code Scanning API to fetch alerts:
+The GitHub client uses the Code Scanning API to fetch alerts:
 
 ```
 GET /repos/{owner}/{repo}/code-scanning/alerts
 ```
 
+The implementation includes pagination support, rate limit handling, and retry logic with exponential backoff.
+
 Documentation: https://docs.github.com/en/rest/code-scanning
 
 ### Devin API
 
-The Devin client will integrate with the Devin API to create sessions and retrieve results. API documentation should be consulted for:
-- Session creation endpoint
-- Status polling endpoint
-- Result retrieval format
+The Devin client integrates with the Devin API for session management:
+- Session creation with formatted task descriptions
+- Status polling with "blocked" state handling
+- Result retrieval from structured_output.json_summary with fallback parsing
+- Automatic retry for transient errors
 
 ## Troubleshooting
 
