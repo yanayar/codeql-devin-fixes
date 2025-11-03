@@ -4,6 +4,34 @@
 
 This GitHub Action automatically identifies and fixes CodeQL security issues using Devin AI. The system fetches open CodeQL alerts from a repository, batches them strategically, and uses Devin to generate fixes for each batch, creating pull requests with the proposed changes.
 
+## Architecture Diagram
+
+┌─────────────────┐
+│ GitHub Repo     │
+│ (CodeQL Alerts) │
+└────────┬────────┘
+         │
+         ▼
+┌───────────────────┐
+│   main.py         │
+│  Orchestrator     │
+└────┬─────┬───┬────┘
+     │     │   │
+ ┌───┘     │   └──────┐
+ ▼         ▼          ▼
+┌──────┐ ┌────────┐ ┌──────┐
+│GitHub│ │Batch   │ │Devin │
+│Client│ │Strategy│ │Client│
+└──┬───┘ └───┬────┘ └───┬──┘
+   │         │          │
+   └────┬────┴────┬─────┘
+        │         │
+        ▼         ▼
+   ┌──────────────────┐
+   │  Pull Requests   │
+   │ (Ready to Review)│
+   └──────────────────┘
+
 ## High-Level Workflow
 
 1. **Trigger**: GitHub Action runs on schedule or manual trigger
