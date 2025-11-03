@@ -491,15 +491,19 @@ class DevinClient:
 
         try:
             session = self.get_session_status(session_id)
+            raw_status = session.metadata.get('raw_status', 'unknown')
 
-            if not session.is_successful():
-                error_msg = f"Session is not completed successfully (status: {session.status.value})"
+            if not session.is_successful() and raw_status != 'blocked':
+                error_msg = f"Session is not completed successfully (status: {session.status.value}, raw_status: {raw_status})"
                 logger.error(error_msg)
                 raise DevinClientError(
                     operation="get_session_result",
                     message=error_msg,
                     session_id=session_id
                 )
+            
+            if raw_status == 'blocked':
+                logger.info(f"Session {session_id} is blocked; treating as completed for automation workflow")
 
             if session.result:
                 logger.info(f"Retrieved result for session {session_id}")
@@ -530,7 +534,15 @@ class DevinClient:
                 commit_messages=commit_messages
             )
 
-            logger.info(f"Retrieved result for session {session_id}: branch={branch_name}, files={len(files_modified)}")
+            if raw_status == 'blocked' and not pr_url and not structured_output:
+                logger.warning(f"Session {session_id} is blocked but has no pull_request or structured_output data")
+                raise DevinClientError(
+                    operation="get_session_result",
+                    message=f"Session is blocked but no usable result data available (no PR or structured output)",
+                    session_id=session_id
+                )
+
+            logger.info(f"Retrieved result for session {session_id}: branch={branch_name}, files={len(files_modified)}, pr_url={pr_url}")
             return result
 
         except DevinClientError:
