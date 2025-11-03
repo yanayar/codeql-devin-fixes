@@ -245,7 +245,7 @@ def process_batches(
         1. Create a Devin session with the alerts
         2. Wait for session to complete
         3. Check if session was successful
-        4. If dry_run is False, verify PR was created
+        4. Verify PR was created
         5. Collect results for summary
 
         If a batch fails, log the error and continue with remaining batches.
@@ -325,13 +325,17 @@ def process_single_batch(
         branch_name = f"codeql-fix/batch-{batch_num}"
         
         logger.info(f"Creating Devin session for batch {batch_num}")
+        
+        secret_ids = None if config.push_mode else []
+        
         session = devin_client.create_session(
             repo_url=repo_url,
             alerts=alerts,
             base_branch=config.base_branch,
             branch_name=branch_name,
             batch_number=batch_num,
-            secret_ids=None,
+            secret_ids=secret_ids,
+            push_mode=config.push_mode,
             title=f"Fix CodeQL alerts (batch {batch_num})"
         )
         
@@ -355,19 +359,29 @@ def process_single_batch(
         
         result = devin_client.get_session_result(session.session_id)
         
-        if config.dry_run:
-            logger.info(f"Dry run mode: skipping PR creation for batch {batch_num}")
-            return {
-                'batch_num': batch_num,
-                'alert_count': len(alerts),
-                'session_id': session.session_id,
-                'status': 'success',
-                'dry_run': True,
-                'branch_name': result.branch_name or branch_name,
-                'files_modified': result.files_modified
-            }
-        
-        if result.branch_name:
+        if not config.push_mode:
+            if not result.diff:
+                logger.error(f"No diff found in session result for batch {batch_num}")
+                return {
+                    'batch_num': batch_num,
+                    'alert_count': len(alerts),
+                    'session_id': session.session_id,
+                    'status': 'failed',
+                    'error': 'No diff found in session result'
+                }
+            
+            logger.info(f"Diff-only mode: creating branch '{branch_name}' and applying diff")
+            github_client.create_branch(
+                branch_name=branch_name,
+                base_branch=config.base_branch
+            )
+            
+            commits = github_client.apply_diff(
+                diff=result.diff,
+                branch=branch_name,
+                commit_message="Fix CodeQL security issues"
+            )
+        elif result.branch_name:
             logger.info(f"Devin pushed branch '{result.branch_name}', checking if it exists on GitHub")
             try:
                 repo_info = github_client.get_repository_info()
@@ -546,7 +560,6 @@ def generate_summary(results: List[Dict[str, Any]], config: Config) -> None:
         'repository': config.github_repository,
         'batch_strategy': config.batch_strategy,
         'batch_size': config.batch_size,
-        'dry_run': config.dry_run,
         'statistics': {
             'total_batches': len(results),
             'successful_batches': successful_batches,

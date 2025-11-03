@@ -121,7 +121,7 @@ The action runs automatically based on the configured schedule. You can also tri
 | `BATCH_SIZE` | No | `5` | Maximum alerts per batch |
 | `BATCH_STRATEGY` | No | `file` | Batching strategy |
 | `BASE_BRANCH` | No | `main` | Base branch for PRs |
-| `DRY_RUN` | No | `false` | Dry run mode (no PRs) |
+| `PUSH_MODE` | No | `false` | If true, Devin pushes branches; if false, use diff-only workflow |
 
 ### Batch Strategies
 

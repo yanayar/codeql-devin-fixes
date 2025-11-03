@@ -191,10 +191,11 @@ class DevinClient:
         alerts: List[CodeQLAlert],
         instructions: Optional[str] = None,
         base_branch: str = "main",
-        branch_name: Optional[str] = None,
+        branch_name: str = "",
         batch_number: Optional[int] = None,
         idempotent: bool = False,
         secret_ids: Optional[List[str]] = None,
+        push_mode: bool = False,
         title: Optional[str] = None,
         tags: Optional[List[str]] = None
     ) -> DevinSession:
@@ -206,9 +207,11 @@ class DevinClient:
             alerts: List of CodeQL alerts to address
             instructions: Optional custom instructions for Devin
             base_branch: Base branch to work from
-            branch_name: Optional branch name for Devin to commit changes to
+            branch_name: Branch name for Devin to commit changes to
+            batch_number: Optional batch number for branch naming
             idempotent: Enable idempotent session creation (default: False)
             secret_ids: List of secret IDs to use (None = all secrets, [] = no secrets)
+            push_mode: If True, Devin pushes branches; if False, use diff-only workflow (default: False)
             title: Custom title for the session
             tags: List of tags to add to the session
 
@@ -223,6 +226,9 @@ class DevinClient:
             For private repositories, ensure a GitHub token with repo access
             is configured as a secret in your Devin organization and either
             use all secrets (secret_ids=None) or pass the specific secret ID.
+            
+            When push_mode=False (default), Devin will not push branches and
+            the GitHub client will handle branch creation via apply_diff workflow.
         """
         if not alerts:
             raise ValueError("Cannot create session with empty alerts list")
@@ -230,7 +236,7 @@ class DevinClient:
         logger.info(f"Creating Devin session for {len(alerts)} alerts in {repo_url}")
 
         task_description = instructions or self._format_task_description(
-            repo_url, alerts, base_branch, branch_name, batch_number
+            repo_url, alerts, base_branch, branch_name, batch_number, push_mode
         )
 
         payload = {
@@ -702,7 +708,8 @@ class DevinClient:
         alerts: List[CodeQLAlert],
         base_branch: str,
         branch_name: Optional[str] = None,
-        batch_number: Optional[int] = None
+        batch_number: Optional[int] = None,
+        push_mode: bool = False
     ) -> str:
         """
         Format a task description for Devin from CodeQL alerts.
@@ -713,6 +720,7 @@ class DevinClient:
             base_branch: Base branch to work from
             branch_name: Optional branch name pattern for Devin to use
             batch_number: Optional batch number for branch naming
+            push_mode: If True, instruct Devin to push branches; if False, use diff-only workflow
 
         Returns:
             Formatted task description string
@@ -740,20 +748,36 @@ class DevinClient:
         lines.append("3. Run tests to ensure fixes don't break functionality")
         
         if branch_name:
-            lines.append("4. Create a new branch, commit your changes, and push the branch to origin")
-            lines.append("")
-            lines.append("BRANCH NAMING:")
-            if batch_number is not None:
-                lines.append(f"- Branch name format: devin-fixes-{{session_id}}-batch-{batch_number}")
-                lines.append("- Use THIS session's ID from the session URL (if it starts with 'devin-', drop that prefix)")
-                lines.append(f"- Example: if session ID is 'devin-abc123', use branch name 'devin-fixes-abc123-batch-{batch_number}'")
+            if push_mode:
+                lines.append("4. Create a new branch, commit your changes, and push the branch to origin")
+                lines.append("")
+                lines.append("BRANCH NAMING:")
+                if batch_number is not None:
+                    lines.append(f"- Branch name format: devin-fixes-{{session_id}}-batch-{batch_number}")
+                    lines.append("- Use THIS session's ID from the session URL (if it starts with 'devin-', drop that prefix)")
+                    lines.append(f"- Example: if session ID is 'devin-abc123', use branch name 'devin-fixes-abc123-batch-{batch_number}'")
+                else:
+                    lines.append(f"- Use branch name: {branch_name}")
+                lines.append("")
+                lines.append("IMPORTANT CONSTRAINTS:")
+                lines.append("- Do NOT create or open a pull request")
+                lines.append("- DO push the branch to origin after committing")
+                lines.append("- The GitHub Client will handle PR creation")
             else:
-                lines.append(f"- Use branch name: {branch_name}")
-            lines.append("")
-            lines.append("IMPORTANT CONSTRAINTS:")
-            lines.append("- Do NOT create or open a pull request")
-            lines.append("- DO push the branch to origin after committing")
-            lines.append("- The GitHub Client will handle PR creation")
+                lines.append("4. Create a new branch, commit your changes. Don't push the branch to origin")
+                lines.append("")
+                lines.append("BRANCH NAMING:")
+                if batch_number is not None:
+                    lines.append(f"- Branch name format: devin-fixes-{{session_id}}-batch-{batch_number}")
+                    lines.append("- Use THIS session's ID from the session URL (if it starts with 'devin-', drop that prefix)")
+                    lines.append(f"- Example: if session ID is 'devin-abc123', use branch name 'devin-fixes-abc123-batch-{batch_number}'")
+                else:
+                    lines.append(f"- Use branch name: {branch_name}")
+                lines.append("")
+                lines.append("IMPORTANT CONSTRAINTS:")
+                lines.append("- Do NOT create or open a pull request")
+                lines.append("- DO NOT push the branch to origin after committing")
+                lines.append("- The GitHub Client will handle branch creation and PR creation")
             lines.append("")
             lines.append("OUTPUT REQUIREMENTS:")
             lines.append("Output EXACTLY the following two sections in plain text (NO markdown code blocks, NO backticks):")

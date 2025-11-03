@@ -20,7 +20,7 @@ class Config:
         batch_size: Maximum number of alerts per batch
         batch_strategy: Strategy for batching alerts (file or severity)
         base_branch: Branch to create PRs against
-        dry_run: If True, don't create actual PRs (testing mode)
+        push_mode: If True, Devin pushes branches (secret_ids=None); if False, use diff-only workflow (secret_ids=[])
     """
 
     github_token: str
@@ -30,7 +30,7 @@ class Config:
     batch_size: int = 5
     batch_strategy: str = "file"
     base_branch: str = "main"
-    dry_run: bool = False
+    push_mode: bool = False
 
     @classmethod
     def load_from_env(cls) -> 'Config':
@@ -54,7 +54,7 @@ class Config:
                 - BATCH_SIZE: Max alerts per batch (default: 5)
                 - BATCH_STRATEGY: Batching strategy (default: file)
                 - BASE_BRANCH: Base branch for PRs (default: main)
-                - DRY_RUN: Dry run mode (default: false)
+                - PUSH_MODE: If true, Devin pushes branches; if false, use diff-only workflow (default: false)
         """
         github_token = os.getenv('GITHUB_TOKEN')
         github_repository = os.getenv('GITHUB_REPOSITORY')
@@ -71,7 +71,7 @@ class Config:
         batch_size = int(os.getenv('BATCH_SIZE', '5'))
         batch_strategy = os.getenv('BATCH_STRATEGY', 'file')
         base_branch = os.getenv('BASE_BRANCH', 'main')
-        dry_run = os.getenv('DRY_RUN', 'false').lower() == 'true'
+        push_mode = os.getenv('PUSH_MODE', 'false').lower() == 'true'
 
         return cls(
             github_token=github_token,
@@ -81,7 +81,7 @@ class Config:
             batch_size=batch_size,
             batch_strategy=batch_strategy,
             base_branch=base_branch,
-            dry_run=dry_run,
+            push_mode=push_mode,
         )
 
     def validate(self) -> None:
@@ -114,5 +114,5 @@ class Config:
             f"batch_size={self.batch_size}, "
             f"batch_strategy={self.batch_strategy}, "
             f"base_branch={self.base_branch}, "
-            f"dry_run={self.dry_run})"
+            f"push_mode={self.push_mode})"
         )
