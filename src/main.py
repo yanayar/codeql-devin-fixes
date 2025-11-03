@@ -245,7 +245,7 @@ def process_batches(
         1. Create a Devin session with the alerts
         2. Wait for session to complete
         3. Check if session was successful
-        4. If dry_run is False, verify PR was created
+        4. Verify PR was created
         5. Collect results for summary
 
         If a batch fails, log the error and continue with remaining batches.
@@ -358,18 +358,6 @@ def process_single_batch(
             }
         
         result = devin_client.get_session_result(session.session_id)
-        
-        if config.dry_run:
-            logger.info(f"Dry run mode: skipping PR creation for batch {batch_num}")
-            return {
-                'batch_num': batch_num,
-                'alert_count': len(alerts),
-                'session_id': session.session_id,
-                'status': 'success',
-                'dry_run': True,
-                'branch_name': result.branch_name or branch_name,
-                'files_modified': result.files_modified
-            }
         
         if not config.push_mode:
             if not result.diff:
@@ -572,7 +560,6 @@ def generate_summary(results: List[Dict[str, Any]], config: Config) -> None:
         'repository': config.github_repository,
         'batch_strategy': config.batch_strategy,
         'batch_size': config.batch_size,
-        'dry_run': config.dry_run,
         'statistics': {
             'total_batches': len(results),
             'successful_batches': successful_batches,

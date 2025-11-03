@@ -199,7 +199,7 @@ Optional:
 - `BATCH_SIZE`: Maximum alerts per batch (default: 5)
 - `BATCH_STRATEGY`: Batching strategy (default: file)
 - `BASE_BRANCH`: Base branch for PRs (default: main)
-- `DRY_RUN`: If true, don't create PRs (default: false)
+- `PUSH_MODE`: If true, Devin pushes branches; if false, use diff-only workflow (default: false)
 
 ## Error Handling
 
