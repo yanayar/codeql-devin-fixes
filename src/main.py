@@ -12,8 +12,8 @@ This module coordinates the entire workflow:
 from dotenv import load_dotenv
 load_dotenv()
 
-import sys
 import logging
+import sys
 from typing import List, Dict, Any
 
 from config import Config

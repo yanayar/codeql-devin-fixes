@@ -4,13 +4,14 @@ Devin API client for triggering security fix sessions.
 This client handles communication with the Devin API to create sessions,
 monitor progress, and retrieve results.
 """
-from typing import List, Optional, Dict, Any
-import requests
-import time
 import logging
 import os
+import time
 from datetime import datetime
+from typing import List, Optional, Dict, Any
 from urllib.parse import urlparse
+
+import requests
 
 from models.alert import CodeQLAlert
 from models.session import DevinSession, SessionResult, SessionStatus
