@@ -1,10 +1,11 @@
 """
 GitHub client for fetching CodeQL alerts and creating pull requests.
 """
-import time
 import logging
-from typing import List, Optional, Dict, Any, Callable
+import time
 from datetime import datetime
+from typing import List, Optional, Dict, Any, Callable
+
 import requests
 from github import Github, GithubException
 from github.PullRequest import PullRequest
