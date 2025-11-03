@@ -330,7 +330,8 @@ def process_single_batch(
             alerts=alerts,
             base_branch=config.base_branch,
             branch_name=branch_name,
-            secret_ids=[],
+            batch_number=batch_num,
+            secret_ids=None,
             title=f"Fix CodeQL alerts (batch {batch_num})"
         )
         
@@ -366,28 +367,88 @@ def process_single_batch(
                 'files_modified': result.files_modified
             }
         
-        if not result.diff:
-            logger.warning(f"No diff found in session result for batch {batch_num}")
-            return {
-                'batch_num': batch_num,
-                'alert_count': len(alerts),
-                'session_id': session.session_id,
-                'status': 'failed',
-                'error': 'No diff found in session result'
-            }
-        
-        logger.info(f"Creating branch '{branch_name}' for batch {batch_num}")
-        github_client.create_branch(
-            branch_name=branch_name,
-            base_branch=config.base_branch
-        )
-        
-        logger.info(f"Applying diff to branch '{branch_name}'")
-        commits = github_client.apply_diff(
-            diff=result.diff,
-            branch=branch_name,
-            commit_message="Fix CodeQL security issues"
-        )
+        if result.branch_name:
+            logger.info(f"Devin pushed branch '{result.branch_name}', checking if it exists on GitHub")
+            try:
+                repo_info = github_client.get_repository_info()
+                repo = github_client.repo
+                try:
+                    repo.get_git_ref(f'heads/{result.branch_name}')
+                    logger.info(f"Branch '{result.branch_name}' exists on GitHub, skipping create_branch and apply_diff")
+                    branch_name = result.branch_name
+                    commits = result.commit_messages or []
+                except Exception as e:
+                    logger.warning(f"Branch '{result.branch_name}' not found on GitHub: {e}")
+                    logger.info(f"Falling back to apply_diff workflow")
+                    if not result.diff:
+                        logger.error(f"No diff found and branch not pushed for batch {batch_num}")
+                        return {
+                            'batch_num': batch_num,
+                            'alert_count': len(alerts),
+                            'session_id': session.session_id,
+                            'status': 'failed',
+                            'error': 'No diff found and branch not pushed'
+                        }
+                    
+                    logger.info(f"Creating branch '{branch_name}' for batch {batch_num}")
+                    github_client.create_branch(
+                        branch_name=branch_name,
+                        base_branch=config.base_branch
+                    )
+                    
+                    logger.info(f"Applying diff to branch '{branch_name}'")
+                    commits = github_client.apply_diff(
+                        diff=result.diff,
+                        branch=branch_name,
+                        commit_message="Fix CodeQL security issues"
+                    )
+            except Exception as e:
+                logger.error(f"Error checking if branch exists: {e}")
+                if not result.diff:
+                    logger.error(f"No diff found and cannot verify branch for batch {batch_num}")
+                    return {
+                        'batch_num': batch_num,
+                        'alert_count': len(alerts),
+                        'session_id': session.session_id,
+                        'status': 'failed',
+                        'error': f'No diff found and cannot verify branch: {str(e)}'
+                    }
+                
+                logger.info(f"Creating branch '{branch_name}' for batch {batch_num}")
+                github_client.create_branch(
+                    branch_name=branch_name,
+                    base_branch=config.base_branch
+                )
+                
+                logger.info(f"Applying diff to branch '{branch_name}'")
+                commits = github_client.apply_diff(
+                    diff=result.diff,
+                    branch=branch_name,
+                    commit_message="Fix CodeQL security issues"
+                )
+        else:
+            if not result.diff:
+                logger.warning(f"No diff found in session result for batch {batch_num}")
+                return {
+                    'batch_num': batch_num,
+                    'alert_count': len(alerts),
+                    'session_id': session.session_id,
+                    'status': 'failed',
+                    'error': 'No diff found in session result'
+                }
+            
+            logger.info(f"Creating branch '{branch_name}' for batch {batch_num}")
+            github_client.create_branch(
+                branch_name=branch_name,
+                base_branch=config.base_branch
+            )
+            
+            logger.info(f"Applying diff to branch '{branch_name}'")
+            commits = github_client.apply_diff(
+                diff=result.diff,
+                branch=branch_name,
+                commit_message="Fix CodeQL security issues"
+            )
         
         pr_title = f"Fix CodeQL security alerts (batch {batch_num})"
         pr_body = f"""## CodeQL Security Fixes

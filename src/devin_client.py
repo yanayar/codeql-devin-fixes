@@ -192,6 +192,7 @@ class DevinClient:
         instructions: Optional[str] = None,
         base_branch: str = "main",
         branch_name: Optional[str] = None,
+        batch_number: Optional[int] = None,
         idempotent: bool = False,
         secret_ids: Optional[List[str]] = None,
         title: Optional[str] = None,
@@ -229,7 +230,7 @@ class DevinClient:
         logger.info(f"Creating Devin session for {len(alerts)} alerts in {repo_url}")
 
         task_description = instructions or self._format_task_description(
-            repo_url, alerts, base_branch, branch_name
+            repo_url, alerts, base_branch, branch_name, batch_number
         )
 
         payload = {
@@ -474,6 +475,65 @@ class DevinClient:
                     session_id=session_id
                 )
 
+    def _parse_devin_output(self, text: str) -> Dict[str, Any]:
+        """
+        Parse Devin's output text to extract JSON summary and unified diff.
+        
+        Args:
+            text: Raw text output from Devin
+            
+        Returns:
+            Dictionary with parsed 'json_data' and 'diff' keys
+            
+        Raises:
+            ValueError: If parsing fails
+        """
+        import json
+        import re
+        
+        result = {'json_data': None, 'diff': None}
+        
+        text_lower = text.lower()
+        json_summary_idx = text_lower.find('json summary')
+        unified_diff_idx = text_lower.find('unified diff')
+        
+        if json_summary_idx == -1:
+            logger.warning("Could not find 'JSON Summary' header in output")
+            return result
+        
+        json_start = json_summary_idx + len('json summary')
+        json_end = unified_diff_idx if unified_diff_idx != -1 else len(text)
+        json_section = text[json_start:json_end].strip()
+        
+        json_section = json_section.strip('`').strip()
+        
+        brace_start = json_section.find('{')
+        brace_end = json_section.rfind('}')
+        
+        if brace_start != -1 and brace_end != -1:
+            json_str = json_section[brace_start:brace_end + 1]
+            try:
+                result['json_data'] = json.loads(json_str)
+                logger.info(f"Successfully parsed JSON summary: {list(result['json_data'].keys())}")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON: {e}")
+                logger.debug(f"JSON string attempted: {json_str[:200]}")
+        
+        if unified_diff_idx != -1:
+            diff_start = unified_diff_idx + len('unified diff')
+            diff_section = text[diff_start:].strip()
+            
+            diff_section = diff_section.strip('`').strip()
+            
+            diff_match = re.search(r'^diff --git', diff_section, re.MULTILINE)
+            if diff_match:
+                result['diff'] = diff_section[diff_match.start():]
+                logger.info(f"Successfully extracted diff: {len(result['diff'])} characters")
+            else:
+                logger.warning("Could not find 'diff --git' in Unified Diff section")
+        
+        return result
+
     def get_session_result(self, session_id: str) -> SessionResult:
         """
         Retrieve the result of a completed session.
@@ -523,6 +583,32 @@ class DevinClient:
             commit_messages = structured_output.get("commit_messages", []) if structured_output else []
             summary = structured_output.get("result") if structured_output else None
 
+            if not diff or not branch_name:
+                logger.info(f"structured_output missing diff or branch_name, attempting fallback parsing")
+                logger.debug(f"Available response keys: {list(data.keys())}")
+                
+                raw_text = None
+                for key in ['output', 'result', 'text', 'content', 'message', 'transcript']:
+                    if key in data and data[key]:
+                        raw_text = data[key]
+                        logger.info(f"Found raw text in field '{key}'")
+                        break
+                
+                if raw_text:
+                    parsed = self._parse_devin_output(raw_text)
+                    
+                    if parsed['json_data']:
+                        branch_name = branch_name or parsed['json_data'].get('branch_name')
+                        files_modified = files_modified or parsed['json_data'].get('files_modified', [])
+                        commit_messages = commit_messages or parsed['json_data'].get('commit_messages', [])
+                        logger.info(f"Extracted from fallback parser: branch={branch_name}, files={len(files_modified)}")
+                    
+                    if parsed['diff']:
+                        diff = diff or parsed['diff']
+                        logger.info(f"Extracted diff from fallback parser: {len(diff)} characters")
+                else:
+                    logger.warning(f"Could not find raw text output in response for fallback parsing")
+
             result = SessionResult(
                 pr_url=pr_url,
                 branch_name=branch_name,
@@ -534,15 +620,15 @@ class DevinClient:
                 commit_messages=commit_messages
             )
 
-            if raw_status == 'blocked' and not pr_url and not structured_output:
-                logger.warning(f"Session {session_id} is blocked but has no pull_request or structured_output data")
+            if raw_status == 'blocked' and not pr_url and not structured_output and not diff:
+                logger.warning(f"Session {session_id} is blocked but has no pull_request, structured_output, or diff data")
                 raise DevinClientError(
                     operation="get_session_result",
-                    message=f"Session is blocked but no usable result data available (no PR or structured output)",
+                    message=f"Session is blocked but no usable result data available (no PR, structured output, or diff)",
                     session_id=session_id
                 )
 
-            logger.info(f"Retrieved result for session {session_id}: branch={branch_name}, files={len(files_modified)}, pr_url={pr_url}")
+            logger.info(f"Retrieved result for session {session_id}: branch={branch_name}, files={len(files_modified)}, pr_url={pr_url}, diff_len={len(diff) if diff else 0}")
             return result
 
         except DevinClientError:
@@ -609,7 +695,8 @@ class DevinClient:
         repo_url: str,
         alerts: List[CodeQLAlert],
         base_branch: str,
-        branch_name: Optional[str] = None
+        branch_name: Optional[str] = None,
+        batch_number: Optional[int] = None
     ) -> str:
         """
         Format a task description for Devin from CodeQL alerts.
@@ -618,7 +705,8 @@ class DevinClient:
             repo_url: URL of the repository to fix
             alerts: List of alerts to fix
             base_branch: Base branch to work from
-            branch_name: Optional branch name to commit changes to
+            branch_name: Optional branch name pattern for Devin to use
+            batch_number: Optional batch number for branch naming
 
         Returns:
             Formatted task description string
@@ -646,19 +734,43 @@ class DevinClient:
         lines.append("3. Run tests to ensure fixes don't break functionality")
         
         if branch_name:
-            lines.append("4. Commit all changes locally (do NOT push)")
+            lines.append("4. Create a new branch, commit your changes, and push the branch to origin")
+            lines.append("")
+            lines.append("BRANCH NAMING:")
+            if batch_number is not None:
+                lines.append(f"- Branch name format: devin-fixes-{{session_id}}-batch-{batch_number}")
+                lines.append("- Use THIS session's ID from the session URL (if it starts with 'devin-', drop that prefix)")
+                lines.append(f"- Example: if session ID is 'devin-abc123', use branch name 'devin-fixes-abc123-batch-{batch_number}'")
+            else:
+                lines.append(f"- Use branch name: {branch_name}")
             lines.append("")
             lines.append("IMPORTANT CONSTRAINTS:")
             lines.append("- Do NOT create or open a pull request")
-            lines.append("- Do NOT push any branches or tags to the remote repository")
-            lines.append("- The GitHub Client will handle branch creation and PR creation")
+            lines.append("- DO push the branch to origin after committing")
+            lines.append("- The GitHub Client will handle PR creation")
             lines.append("")
             lines.append("OUTPUT REQUIREMENTS:")
-            lines.append("Output exactly two blocks in this order:")
-            lines.append("1. JSON summary with keys: branch_name, files_modified, commit_messages")
-            lines.append("2. Unified diff for all changes (git diff format)")
+            lines.append("Output EXACTLY the following two sections in plain text (NO markdown code blocks, NO backticks):")
             lines.append("")
-            lines.append("STOP after outputting the JSON summary and unified diff. Do not perform any other actions.")
+            lines.append("JSON Summary")
+            lines.append("{")
+            if batch_number is not None:
+                lines.append(f'  "branch_name": "devin-fixes-{{session_id}}-batch-{batch_number}",')
+            else:
+                lines.append(f'  "branch_name": "{branch_name}",')
+            lines.append('  "files_modified": ["file1.py", "file2.py"],')
+            lines.append('  "commit_messages": ["commit message 1", "commit message 2"]')
+            lines.append("}")
+            lines.append("")
+            lines.append("Unified Diff")
+            lines.append("diff --git a/file1.py b/file1.py")
+            lines.append("index abc123..def456 100644")
+            lines.append("--- a/file1.py")
+            lines.append("+++ b/file1.py")
+            lines.append("[actual diff content here]")
+            lines.append("")
+            lines.append("CRITICAL: Do NOT wrap the output in markdown code blocks. Output plain text only.")
+            lines.append("STOP after outputting the JSON Summary and Unified Diff sections. Do not perform any other actions.")
         else:
             lines.append(f"4. Create a PR with your changes against {base_branch}")
 
